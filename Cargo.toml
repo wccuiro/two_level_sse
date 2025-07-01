@@ -2,14 +2,12 @@
 name = "two_level_sse"
 version = "0.1.0"
 edition = "2021"
-build = "build.rs"
 
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 ndarray = "0.15"
-ndarray-linalg = "0.16"
 num-complex = "0.4"
 rand = "0.8"
 rayon = "1.7"

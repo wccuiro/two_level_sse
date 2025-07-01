@@ -194,7 +194,6 @@ fn lindblad_simulation(
 
         let szz = v_identity.dot(&v_sigmaz.dot(&rho)).re;
         sz_exp.push(szz);
-
     }
 
     sz_exp
@@ -346,7 +345,7 @@ fn plot_trajectory_avg(
 fn main() -> Result<(), Box<dyn std::error::Error>>{
     let omega: f64 = 0.7;
     let gamma: f64 = 0.2;
-    let dt: f64 = 0.0001;
+    let dt: f64 = 0.01;
     let total_time: f64 = 30.0;
     let num_trajectories: usize = 300;
 
@@ -391,10 +390,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>>{
         total_time,
     );
 
-    let filename_cm = format!("histogram_cm_omega-{}_gamma-{}_dt-{:.5}_ntraj-{}.png", omega, gamma, dt, num_trajectories);
+    let filename_cm = format!("histogram_cm_omega-{}_gamma-{}_dt-{}_ntraj-{}.png", omega, gamma, dt, num_trajectories);
     plot_histogram(&counts_cm, bin_width_cm, 0.0, total_time, &filename_cm)?;
 
-    let filename_rj = format!("histogram_rj_omega-{}_gamma-{}_dt-{:.5}_ntraj-{}.png", omega, gamma, dt, num_trajectories);
+    let filename_rj = format!("histogram_rj_omega-{}_gamma-{}_dt-{}_ntraj-{}.png", omega, gamma, dt, num_trajectories);
     plot_histogram(&counts_rj, bin_width_rj, 0.0, total_time, &filename_rj)?;
 
 
@@ -411,8 +410,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>>{
     let avg_rj: Array1<f64> = data_rj.mean_axis(Axis(0)).unwrap();
 
     // Plot the average trajectory
-    let filename = format!("plot_omega-{}_gamma-{}_dt-{:.5}_ntraj-{}.png", omega, gamma, dt, num_trajectories);
+    let filename = format!("plot_omega-{}_gamma-{}_dt-{}_ntraj-{}.png", omega, gamma, dt, num_trajectories);
     plot_trajectory_avg(avg_cm, avg_rj, lindblad_avg, steps, &filename)?;
 
+    println!("Simulation completed successfully!");
+    println!("Generated files: {}, {}, {}", filename_cm, filename_rj, filename);
     Ok(())
 }
