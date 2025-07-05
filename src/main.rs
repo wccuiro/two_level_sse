@@ -15,17 +15,18 @@ fn gen_sigma_x() -> Array2<Complex64> {
     ]
 }
 
-fn gen_sigma_z() -> Array2<Complex64> {
-    array![
-        [Complex64::new(1.0, 0.0), Complex64::new(0.0, 0.0)],
-        [Complex64::new(0.0, 0.0), Complex64::new(-1.0, 0.0)]
-    ]
-}
 
 fn gen_sigma_y() -> Array2<Complex64> {
     array![
         [Complex64::new(0.0, 0.0), Complex64::new(0.0, -1.0)],
         [Complex64::new(0.0, 1.0), Complex64::new(0.0, 0.0)]
+        ]
+}
+    
+fn gen_sigma_z() -> Array2<Complex64> {
+    array![
+        [Complex64::new(1.0, 0.0), Complex64::new(0.0, 0.0)],
+        [Complex64::new(0.0, 0.0), Complex64::new(-1.0, 0.0)]
     ]
 }
 
@@ -40,9 +41,9 @@ fn simulate_spin_jump_cm(
 
     let sigma_z = gen_sigma_z();
 
-    let sigma_plus = gen_sigma_x().mapv(|e| e * Complex64::new(0.5, 0.0)) + gen_sigma_y().mapv(|e| e * Complex64::new(0.5, 1.0)) ;
+    let sigma_plus = gen_sigma_x().mapv(|e| e * Complex64::new(0.5, 0.0)) + gen_sigma_y().mapv(|e| e * Complex64::new(0.0, 0.5)) ;
 
-    let sigma_minus = gen_sigma_x().mapv(|e| e * Complex64::new(0.5, 0.0)) - gen_sigma_y().mapv(|e| e * Complex64::new(0.5, 1.0)) ;
+    let sigma_minus = gen_sigma_x().mapv(|e| e * Complex64::new(0.5, 0.0)) - gen_sigma_y().mapv(|e| e * Complex64::new(0.0, 0.5)) ;
 
     let steps = (total_time / dt).ceil() as usize;
 
@@ -63,9 +64,9 @@ fn simulate_spin_jump_cm(
             - &(h_eff.dot(&psi).mapv(|e| Complex64::new(0.0, 1.0) * e)))
             .mapv(|e| e * dt);
 
-        if rng.gen::<f64>() < p_jump {
-            let norm_factor = (gamma * amp).sqrt();
-            psi = sigma_minus.dot(&psi).mapv(|e| e * (gamma.sqrt() / norm_factor));
+        if rng.gen::<f64>() <= p_jump {
+            let norm_factor = amp.sqrt();
+            psi = sigma_minus.dot(&psi).mapv(|e| e * (1. / norm_factor));
             time_jumps.push(i as f64 * dt); 
         }
 
@@ -95,9 +96,9 @@ fn simulate_spin_jump_rj(
 
     let sigma_z = gen_sigma_z();
 
-    let sigma_plus = gen_sigma_x().mapv(|e| e * Complex64::new(0.5, 0.0)) + gen_sigma_y().mapv(|e| e * Complex64::new(0.5, 1.0)) ;
+    let sigma_plus = gen_sigma_x().mapv(|e| e * Complex64::new(0.5, 0.0)) + gen_sigma_y().mapv(|e| e * Complex64::new(0.0, 0.5)) ;
 
-    let sigma_minus = gen_sigma_x().mapv(|e| e * Complex64::new(0.5, 0.0)) - gen_sigma_y().mapv(|e| e * Complex64::new(0.5, 1.0)) ;
+    let sigma_minus = gen_sigma_x().mapv(|e| e * Complex64::new(0.5, 0.0)) - gen_sigma_y().mapv(|e| e * Complex64::new(0.0, 0.5)) ;
 
     let sigma_pm = sigma_plus.dot(&sigma_minus);
     let h_eff = sigma_x.mapv(|e| e * omega) - sigma_pm.mapv(|e| e * (gamma * Complex64::new(0.0, 0.5)));
@@ -122,17 +123,15 @@ fn simulate_spin_jump_rj(
             .mapv(|e| e * dt);
 
         if r >= p0 {
-            let norm_factor = (gamma * amp).sqrt();
-            psi = sigma_minus.dot(&psi).mapv(|e| e * (gamma.sqrt() / norm_factor));
+            let norm_factor = amp.sqrt();
+            psi = sigma_minus.dot(&psi).mapv(|e| e * (1. / norm_factor));
             time_jumps.push(i as f64 * dt); 
             nh_evol = true;
         }
 
         psi = &psi + &dpsi_nh;
-        psi = psi.mapv(|e| {
-            let nn = psi.mapv(|x| x.norm_sqr()).sum().sqrt();
-            e / nn
-        });
+        let norm = psi.mapv(|x| x.conj()).dot(&psi).re.sqrt();
+        psi.mapv_inplace(|e| e / norm);
 
         let szz = psi.mapv(|x| x.conj()).dot(&sigma_z.dot(&psi)).re;
         sz_exp.push(szz);
@@ -158,9 +157,9 @@ fn lindblad_simulation(
 
     let sigma_z = gen_sigma_z();
 
-    let sigma_plus = gen_sigma_x().mapv(|e| e * Complex64::new(0.5, 0.0)) + gen_sigma_y().mapv(|e| e * Complex64::new(0.5, 1.0)) ;
+    let sigma_plus = gen_sigma_x().mapv(|e| e * Complex64::new(0.5, 0.0)) + gen_sigma_y().mapv(|e| e * Complex64::new(0.0, 0.5)) ;
 
-    let sigma_minus = gen_sigma_x().mapv(|e| e * Complex64::new(0.5, 0.0)) - gen_sigma_y().mapv(|e| e * Complex64::new(0.5, 1.0)) ;
+    let sigma_minus = gen_sigma_x().mapv(|e| e * Complex64::new(0.5, 0.0)) - gen_sigma_y().mapv(|e| e * Complex64::new(0.0, 0.5)) ;
 
     // let sigma_pm = sigma_plus.dot(&sigma_minus);
 
@@ -176,21 +175,22 @@ fn lindblad_simulation(
         Complex64::new(0.0, 0.0), Complex64::new(1.0, 0.0)
     ];
 
-    let term1 = kron(&h_eff, &identity) - kron(&identity, &h_eff.t());
+    let commutator = kron(&h_eff, &identity) - kron(&identity, &h_eff.t());
     let term2 = kron(&sigma_minus, &sigma_plus.t());
 
     let left = sigma_plus.dot(&sigma_minus);
     let right = sigma_minus.t().dot(&sigma_plus.t());
 
-    let term3 = (kron(&left, &identity) + kron(&identity, &right)).mapv(|e| e * 0.5);
+    let anticommutator = (kron(&left, &identity) + kron(&identity, &right)).mapv(|e| e * 0.5);
 
-    let s_l = &term1.mapv(|e| e * Complex64::new(0.0, -1.0)) + (&term2 - &term3).mapv(|e| e * gamma);
+    let s_l = &commutator.mapv(|e| e * Complex64::new(0.0, -1.0)) + (&term2 - &anticommutator).mapv(|e| e * gamma);
 
     let mut rho = array![Complex64::new(1.0, 0.0), Complex64::new(0.0, 0.0), Complex64::new(0.0, 0.0), Complex64::new(0.0, 0.0)];
 
     for _ in 0..max_steps {
         rho = &rho + (&s_l.dot(&rho)).mapv(|e| e * dt);
-        rho = rho.mapv(|e| e / v_identity.dot(&rho).re);
+        let norm = v_identity.dot(&rho).re;
+        rho = rho.mapv(|e| e / norm);
 
         let szz = v_identity.dot(&v_sigmaz.dot(&rho)).re;
         sz_exp.push(szz);
@@ -217,8 +217,11 @@ fn bin_width(data: &[f64]) -> f64 {
         }
     }
 
-    let q1 = quantile(data, 0.25);
-    let q3 = quantile(data, 0.75);
+    let mut sorted = data.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+    let q1 = quantile(&sorted, 0.25);
+    let q3 = quantile(&sorted, 0.75);
     let iqr = q3 - q1;
     let n = data.len() as f64;
 
@@ -245,6 +248,34 @@ fn counts_per_bin(
 
     counts
 }
+
+fn compute_tick_times(times: &Vec<f64>, m: usize) -> Array1<f64> {
+    let ticks: Vec<f64> = times
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, &t)| {
+            // idx starts at 0, so (idx+1)%m == 0 picks the mᵗʰ, 2mᵗʰ, ...
+            if (idx + 1) % m == 0 {
+                Some(t)
+            } else {
+                None
+            }
+        })
+        .collect();
+    Array1::from(ticks)
+}
+
+/// Given an Array1<f64> of tick times [t₁, t₂, …], return Vec<f64> of [t₂−t₁, t₃−t₂, …]
+fn analyze_waiting_times(ticks: &Array1<f64>) -> Vec<f64> {
+    let slice = ticks
+        .as_slice()
+        .expect("tick array must be contiguous");
+    slice
+        .windows(2)
+        .map(|w| w[1] - w[0])
+        .collect()
+}
+
 
 
 fn plot_histogram(
@@ -343,11 +374,13 @@ fn plot_trajectory_avg(
 
 
 fn main() -> Result<(), Box<dyn std::error::Error>>{
-    let omega: f64 = 0.7;
-    let gamma: f64 = 0.2;
-    let dt: f64 = 0.01;
+    let omega: f64 = 1.7;
+    let gamma: f64 = 0.1;
+    let dt: f64 = 0.001;
     let total_time: f64 = 30.0;
-    let num_trajectories: usize = 300;
+    let num_trajectories: usize = 5000;
+
+    let m: usize = 5;
 
     // Calculate number of steps as usize
     let steps: usize = (total_time / dt).ceil() as usize;
@@ -366,25 +399,51 @@ fn main() -> Result<(), Box<dyn std::error::Error>>{
     
     let lindblad_avg: Vec<f64> = lindblad_simulation(omega, gamma, dt, total_time);
 
-    let mut flat_times_jumps_cm: Vec<f64> = times_jumps_cm.into_iter().flatten().collect();
-    flat_times_jumps_cm.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let all_waiting_times_rj: Vec<Vec<f64>> = times_jumps_rj
+        .par_iter()                     // Rayon parallel iterator over &Vec<f64>
+        .map(|times: &Vec<f64>| {
+            let ticks = compute_tick_times(times, m);
+            analyze_waiting_times(&ticks)
+        })
+        .collect();
 
-    let mut flat_times_jumps_rj: Vec<f64> = times_jumps_rj.into_iter().flatten().collect();
-    flat_times_jumps_rj.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    // Optionally flatten into one big Vec<f64>:
+    let mut flat_waits_rj: Vec<f64> = all_waiting_times_rj
+        .into_par_iter()
+        .flatten()
+        .collect();
 
-    let bin_width_cm = bin_width(&flat_times_jumps_cm);
-    let bin_width_rj = bin_width(&flat_times_jumps_rj);
+    flat_waits_rj.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+    let all_waiting_times_cm: Vec<Vec<f64>> = times_jumps_cm
+        .par_iter()                     // Rayon parallel iterator over &Vec<f64>
+        .map(|times: &Vec<f64>| {
+            let ticks = compute_tick_times(times, m);
+            analyze_waiting_times(&ticks)
+        })
+        .collect();
+
+    // Optionally flatten into one big Vec<f64>:
+    let mut flat_waits_cm: Vec<f64> = all_waiting_times_cm
+        .into_par_iter()
+        .flatten()
+        .collect();
+
+    flat_waits_cm.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+    let bin_width_cm = bin_width(&flat_waits_cm);
+    let bin_width_rj = bin_width(&flat_waits_rj);
 
 
     let counts_cm = counts_per_bin(
-        &flat_times_jumps_cm,
+        &flat_waits_cm,
         bin_width_cm,
         0.0,
         total_time,
     );
 
     let counts_rj = counts_per_bin(
-        &flat_times_jumps_rj,
+        &flat_waits_rj,
         bin_width_rj,
         0.0,
         total_time,
