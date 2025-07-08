@@ -433,9 +433,14 @@ fn plot_trajectory_avg(
     steps: usize,
     filename: &str,
     min:f64,
-    max:f64
+    max:f64,
+    mean_avg_cm:f64,
+    std_cm:f64,
+    mean_avg_rj:f64,
+    std_rj:f64
 ) -> Result<(), Box<dyn std::error::Error>> {
 
+    //Create the drawing area
     let root = BitMapBackend::new(&filename, (1600, 1200)).into_drawing_area();
     root.fill(&WHITE)?;
 
@@ -452,6 +457,7 @@ fn plot_trajectory_avg(
         .label_style(("FiraCode Nerd Font", 30).into_font())
         .draw()?;
 
+    // Draw the average trajectories and their standard deviations following CM algorithm
     chart.draw_series(LineSeries::new(
         avg_cm.iter().enumerate().map(|(x, y)| (x, *y)),
         &BLUE,
@@ -459,6 +465,20 @@ fn plot_trajectory_avg(
     .label("CM")
     .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], &BLUE));
 
+    chart.draw_series(AreaSeries::new(
+        (0..avg_cm.len()).map(|i| (i, mean_avg_cm + std_cm)),    // upper curve
+        mean_avg_cm - std_cm,        // lower constant baseline
+        &BLUE.mix(0.2) // translucent fill
+    ))?
+    .label("±1σ")
+    .legend(|(x, y)| {
+        Rectangle::new(
+            [(x, y - 5), (x + 20, y + 5)],
+            &BLUE.mix(0.2),
+        )
+    });
+
+    // Draw the average trajectories and their standard deviations following RJ algorithm
     chart.draw_series(LineSeries::new(
         avg_rj.iter().enumerate().map(|(x, y)| (x, *y)),
         &RED,
@@ -466,6 +486,20 @@ fn plot_trajectory_avg(
     .label("RJ")
     .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], &RED));
 
+    chart.draw_series(AreaSeries::new(
+        (0..avg_rj.len()).map(|i| (i, mean_avg_rj + std_rj)),    // upper curve
+        mean_avg_rj - std_rj,        // lower constant baseline
+        &RED.mix(0.2) // translucent fill
+    ))?
+    .label("±1σ")
+    .legend(|(x, y)| {
+        Rectangle::new(
+            [(x, y - 5), (x + 20, y + 5)],
+            &RED.mix(0.2),
+        )
+    });
+
+    // Draw the Lindblad average trajectory
     chart.draw_series(LineSeries::new(
         lindblad_avg.iter().enumerate().map(|(x, y)| (x, *y)),
         &MAGENTA,
@@ -473,6 +507,7 @@ fn plot_trajectory_avg(
     .label("Avg")
     .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], &MAGENTA));
 
+    // Draw the legend
     chart.configure_series_labels()
     .position(SeriesLabelPosition::UpperRight)
     .label_font(("FiraCode Nerd Font", 40).into_font())
@@ -489,9 +524,9 @@ fn plot_trajectory_avg(
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let omega: f64 = 10.0;
     let gamma: f64 = 7.0;
-    let dt: f64 = 0.0001;
+    let dt: f64 = 0.001;
     let total_time: f64 = 30.0;
-    let num_trajectories: usize = 1000;
+    let num_trajectories: usize = 10000;
     let m: usize = 5;
     let steps: usize = (total_time / dt).ceil() as usize;
 
@@ -599,8 +634,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let avg_cm: Array1<f64> = data_cm.mean_axis(Axis(0)).unwrap();
     let avg_rj: Array1<f64> = data_rj.mean_axis(Axis(0)).unwrap();
     
-    let min: f64 = avg_cm.mean().unwrap() - avg_cm.var(0.0).sqrt();
-    let max: f64 = avg_rj.mean().unwrap() + avg_rj.var(0.0).sqrt();
+    let mean_avg_cm: f64 = avg_cm.mean().unwrap();
+    let mean_avg_rj: f64 = avg_rj.mean().unwrap();
+
+    let std_cm: f64 = avg_cm.var(0.0).sqrt();
+    let std_rj: f64 = avg_rj.var(0.0).sqrt();
+
+    let min: f64 = avg_cm.mean().unwrap() - 2.5 * (std_cm + std_rj);
+    let max: f64 = avg_cm.mean().unwrap() + 2.5 * (std_cm + std_rj);
+    
     println!("CM average trajectory: {}", avg_cm.mean().unwrap());
     println!("CM average trajectory std: {}", avg_cm.var(0.0).sqrt());
 
@@ -608,7 +650,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("RJ average trajectory std: {}", avg_rj.var(0.0).sqrt());
     
     let filename = format!("plot_omega-{}_gamma-{}_dt-{}_ntraj-{}.png", omega, gamma, dt, num_trajectories);
-    plot_trajectory_avg(avg_cm, avg_rj, lindblad_avg, steps, &filename, min, max)?;
+    plot_trajectory_avg(avg_cm, avg_rj, lindblad_avg, steps, &filename, min, max, mean_avg_cm, std_cm, mean_avg_rj, std_rj)?;
     
     println!("Simulation completed successfully!");
     println!("Generated files: {}, {}, {}", filename_cm, filename_rj, filename);
