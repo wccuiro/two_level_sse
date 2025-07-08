@@ -8,14 +8,17 @@ use rayon::prelude::*;
 use plotters::prelude::*;
 
 
-use std::fs::{self, File, create_dir_all, remove_file};
-use std::io::Write;
-use std::path::Path;
+// use std::fs::{self, File, create_dir_all, remove_file};
+// use std::io::Write;
+// use std::path::Path;
 // use std::sync::atomic::{AtomicUsize, Ordering};
 
+use indicatif::{ProgressBar, ProgressStyle};
+// use std::sync::Arc;
+// use std::time::Duration;
 
 
-use csv::ReaderBuilder;
+// use csv::ReaderBuilder;
 
 
 fn gen_sigma_x() -> Array2<Complex64> {
@@ -40,6 +43,71 @@ fn gen_sigma_z() -> Array2<Complex64> {
     ]
 }
 
+fn steady_state(gamma: f64, omega: f64) -> (Array2<Complex64>, Array1<Complex64>, Array1<Complex64>, Array1<f64>) {
+    let delta: f64 =  (gamma.powi(4) + 16. * gamma.powi(2) * omega.powi(2)).sqrt();
+
+    // Eigenvalues
+    let eig_val_1 = (gamma.powi(2) + 8. * omega.powi(2) - delta) / (2. * gamma.powi(2) + 8. * omega.powi(2));
+    
+    let eig_val_2 = (gamma.powi(2) + 8. * omega.powi(2) + delta) / (2. * gamma.powi(2) + 8. * omega.powi(2));
+
+    let mut eig_vals: Array1<f64> = array![eig_val_1, eig_val_2];
+    eig_vals = eig_vals.mapv(|e| e/ (eig_val_1 + eig_val_2));
+
+    // Eigenvectors
+    let i = Complex64::new(0.0, 1.0);
+
+    // psi1
+    let top11 = i * (gamma + (gamma.powi(2) + 16. * omega.powi(2)).sqrt());
+    let norm1 = (16.0 * omega.powi(2) + (gamma - (gamma.powi(2) + 16. * omega.powi(2)).sqrt()).powi(2)).sqrt();
+    let top12 = 4. * omega;
+    let mut psi1 = Array1::from(vec![top11 / norm1, Complex64::new( top12 / norm1, 0.0)]);
+    psi1 /= psi1.mapv(|e| e.conj()).dot(&psi1).sqrt();
+
+    // psi2
+    let top21 = i * (gamma - (gamma.powi(2) + 16. * omega.powi(2)).sqrt());
+    let norm2 = (16.0 * omega.powi(2) + (gamma + (gamma.powi(2) + 16. * omega.powi(2)).sqrt()).powi(2)).sqrt();
+    let top22 = 4. * omega;
+    let mut psi2 = Array1::from(vec![top21 / norm2, Complex64::new( top22 / norm2, 0.0)]);
+    psi2 /= psi2.mapv(|e| e.conj()).dot(&psi2).sqrt();
+
+
+    // Steady state density matrix
+    // Compute |psi1><psi1|
+    let a = psi1[0];
+    let b = psi1[1];
+    let op1 = array![
+        [a * a.conj(), a * b.conj()],
+        [b * a.conj(), b * b.conj()]
+    ];
+
+    // Compute |psi2><psi2|
+    let c = psi2[0];
+    let d = psi2[1];
+    let op2 = array![
+        [c * c.conj(), c * d.conj()],
+        [d * c.conj(), d * d.conj()]
+    ];
+
+    // Weighted sum
+    let mut pi = op1.mapv(|v| v * eig_vals[0]) + op2.mapv(|v| v * eig_vals[1]);
+    // let pi_def:Array2<Complex64> = array![
+    //     [Complex64::new(4. * omega.powi(2), 0.0), Complex64::new(0.0, 2. * omega * gamma)],
+    //     [Complex64::new(0.0, -2. * omega * gamma), Complex64::new(gamma.powi(2) + 4. * omega.powi(2), 0.0)]
+    // ]/ Complex64::new( (gamma.powi(2) + 8. * omega.powi(2)) ,0.0);
+
+    // let pi_dif = pi.clone() - pi_def;
+    // println!("Difference between steady state and analytical solution: \n{:?}", pi_dif);
+
+    // Normalize by trace
+    let trace: f64 = (pi[(0, 0)] + pi[(1, 1)]).re;
+    // println!("Trace of steady state density matrix: {}", trace);
+    pi /= Complex64::new(trace, 0.0);
+
+    (pi, psi1, psi2, eig_vals)
+}
+
+
 fn simulate_spin_jump_cm(
     omega: f64,
     gamma: f64,
@@ -57,15 +125,26 @@ fn simulate_spin_jump_cm(
 
     let steps = (total_time / dt).ceil() as usize;
 
-    let mut psi: Array1<Complex64>  = array![Complex64::new(1.0, 0.0), Complex64::new(0.0, 0.0)];
+    // Initialize the state vector psi
+    let (_, psi1, psi2, eigvals) = steady_state(gamma, omega);
+    let mut rng = rand::thread_rng();
+    let i = if rng.gen::<f64>() < eigvals[0] { 0 } else { 1 };
+    let mut psi;
+        
+    if i == 0 {
+        psi = psi1;
+        psi /= psi.mapv(|e| e.conj()).dot(&psi).sqrt();
+    } else {
+        psi = psi2;
+        psi /= psi.mapv(|e| e.conj()).dot(&psi).sqrt();
+    }
+
     let mut sz_exp = Vec::with_capacity(steps);
 
     let mut time_jumps:Vec<f64> = Vec::new();
 
     let sigma_pm = sigma_plus.dot(&sigma_minus);
     let h_eff = sigma_x.mapv(|e| e * omega) - sigma_pm.mapv(|e| e * (gamma * Complex64::new(0.0, 0.5)));
-
-    let mut rng = rand::thread_rng();
 
     for i in 0..steps {
         let amp = psi.mapv(|x| x.conj()).dot(&sigma_pm.dot(&psi)).re;
@@ -87,7 +166,8 @@ fn simulate_spin_jump_cm(
         let szz = psi.mapv(|x| x.conj()).dot(&sigma_z.dot(&psi)).re;
         sz_exp.push(szz);
     }
-    // println!("Number of jumps cm: {}",time_jumps.len());
+
+    // println!("CM simulation completed with {} jumps.", time_jumps.len());
 
     (sz_exp, time_jumps)
 }
@@ -114,8 +194,19 @@ fn simulate_spin_jump_rj(
     let sigma_pm = sigma_plus.dot(&sigma_minus);
     let h_eff = sigma_x.mapv(|e| e * omega) - sigma_pm.mapv(|e| e * (gamma * Complex64::new(0.0, 0.5)));
 
-    let mut psi = array![Complex64::new(1.0, 0.0), Complex64::new(0.0, 0.0)];
+    // Initialize the state vector psi
+    let (_, psi1, psi2, eigvals) = steady_state(gamma, omega);
     let mut rng = rand::thread_rng();
+    let i = if rng.gen::<f64>() < eigvals[0] { 0 } else { 1 };
+    let mut psi;
+        
+    if i == 0 {
+        psi = psi1;
+        psi /= psi.mapv(|e| e.conj()).dot(&psi).sqrt();
+    } else {
+        psi = psi2;
+        psi /= psi.mapv(|e| e.conj()).dot(&psi).sqrt();
+    }
 
     let mut p0 = 1.0;
     let mut r = rng.gen::<f64>();
@@ -151,8 +242,7 @@ fn simulate_spin_jump_rj(
         p0 *= 1.0 - p_jump;
     }
 
-    // println!("Number of jumps rj: {}",time_jumps.len());
-
+    // println!("CM simulation completed with {} jumps.", time_jumps.len());
 
     (sz_exp, time_jumps)
 }
@@ -199,8 +289,11 @@ fn lindblad_simulation(
 
     let s_l = &commutator.mapv(|e| e * Complex64::new(0.0, -1.0)) + (&term2 - &anticommutator).mapv(|e| e * gamma);
 
-    let mut rho = array![Complex64::new(1.0, 0.0), Complex64::new(0.0, 0.0), Complex64::new(0.0, 0.0), Complex64::new(0.0, 0.0)];
-
+    // Initialize the state vector psi
+    let (pi, _, _, _) = steady_state(gamma, omega);
+    // println!("{:?}",pi);
+    let mut rho: Array1<Complex64> = pi.into_raw_vec().into();
+    // println!("{:?}",rho);
     for _ in 0..max_steps {
         rho = &rho + (&s_l.dot(&rho)).mapv(|e| e * dt);
         let norm = v_identity.dot(&rho).re;
@@ -301,7 +394,7 @@ fn plot_histogram(
 ) -> Result<(), Box<dyn std::error::Error>> {
 
     // Set up drawing area
-    let root = BitMapBackend::new(filename, (800, 600)).into_drawing_area();
+    let root = BitMapBackend::new(filename, (1600, 1200)).into_drawing_area();
     root.fill(&WHITE)?;
 
     let max_count = *counts.iter().max().unwrap_or(&0);
@@ -339,6 +432,8 @@ fn plot_trajectory_avg(
     lindblad_avg: Vec<f64>,
     steps: usize,
     filename: &str,
+    min:f64,
+    max:f64
 ) -> Result<(), Box<dyn std::error::Error>> {
 
     let root = BitMapBackend::new(&filename, (1600, 1200)).into_drawing_area();
@@ -349,7 +444,7 @@ fn plot_trajectory_avg(
         .margin(100)
         .x_label_area_size(40)
         .y_label_area_size(40)
-        .build_cartesian_2d(0..steps, -1.0..1.0)?;
+        .build_cartesian_2d(0..steps, min..max)?;
 
     chart.configure_mesh()
         .x_desc("Time steps")
@@ -387,264 +482,134 @@ fn plot_trajectory_avg(
 }
 
 
-fn clean_directory(dir: &str) -> std::io::Result<()> {
-    if Path::new(dir).exists() {
-        for entry in fs::read_dir(dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            if path.is_file() {
-                remove_file(path)?;
-            }
-        }
-    }
-    Ok(())
-}
 
 
+
+// No CHUNKS NO wirte files YES prograss bars
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Simulation parameters
     let omega: f64 = 10.0;
     let gamma: f64 = 7.0;
-    let dt: f64 = 0.001;
+    let dt: f64 = 0.0001;
     let total_time: f64 = 30.0;
-    let num_trajectories: usize = 5000;
-    let m: usize = 10;
-
-    // Precompute number of steps for reshaping
-    // let steps: usize = (total_time / dt).ceil() as usize;
-
-    // Prepare output directories
-    // let base_dir = "trajectories";
-    // let cm_dir = format!("{}/cm", base_dir);
-    // let rj_dir = format!("{}/rj", base_dir);
-
-
-    // // 1) Clean out old files (if any)
-    // clean_directory(&cm_dir)?;
-    // clean_directory(&rj_dir)?;
-    // // 2) (Re)create the directories
-    // create_dir_all(&cm_dir)?;
-    // create_dir_all(&rj_dir)?;
-
-    // // Atomic counters for unique filenames
-    // let counter_cm = AtomicUsize::new(0);
-    // let counter_rj = AtomicUsize::new(0);
-
-    // chunking
-    let chunk_size: usize = 500;
-    let cm_chunks = (num_trajectories + chunk_size - 1) / chunk_size;
-    let rj_chunks = cm_chunks;
-
-    // precompute steps
+    let num_trajectories: usize = 1000;
+    let m: usize = 5;
     let steps: usize = (total_time / dt).ceil() as usize;
 
-    // ─── Prepare directories ──────────────────────────────────────────────────
-    let base_dir = "trajectories";
-    let cm_dir   = format!("{}/cm", base_dir);
-    let rj_dir   = format!("{}/rj", base_dir);
+    // Create and configure progress bar
+    let pb_cm = ProgressBar::new(num_trajectories as u64);
+    pb_cm.set_style(
+        ProgressStyle::default_bar()
+        .template("Running CM: [{bar:40.cyan/blue}] {pos}/{len} ({eta})")
+            .unwrap(),
+    );
 
-    // clean & recreate
-    clean_directory(&cm_dir)?;
-    clean_directory(&rj_dir)?;
+    let (trajectories_cm, times_jumps_cm): (Vec<Vec<f64>>, Vec<Vec<f64>>) = (0..num_trajectories)
+        .into_par_iter()
+        .map_init(|| pb_cm.clone(), |pb, _| {
+            let result = simulate_spin_jump_cm(omega, gamma, dt, total_time);
+            pb.inc(1);
+            result
+        })
+        .unzip();
+    pb_cm.finish_with_message("CM simulation complete");
+
+    let pb_rj = ProgressBar::new(num_trajectories as u64);
+    pb_rj.set_style(
+        ProgressStyle::default_bar()
+            .template("Running RJ: [{bar:40.green/black}] {pos}/{len} ({eta})")
+            .unwrap(),
+    );
+
+    let (trajectories_rj, times_jumps_rj): (Vec<Vec<f64>>, Vec<Vec<f64>>) = (0..num_trajectories)
+    .into_par_iter()
+        .map_init(|| pb_rj.clone(), |pb, _| {
+            let result = simulate_spin_jump_rj(omega, gamma, dt, total_time);
+            pb.inc(1);
+            result
+        })
+        .unzip();
+    pb_rj.finish_with_message("RJ simulation complete");
     
-    create_dir_all(&cm_dir)?;
-    create_dir_all(&rj_dir)?;
-
-    // ─── CM: simulate & write in chunks ───────────────────────────────────────
-    (0..cm_chunks).into_par_iter().for_each(|chunk_idx| {
-        let start = chunk_idx * chunk_size;
-        let end   = ((chunk_idx + 1) * chunk_size).min(num_trajectories);
-        let count = end - start;
-
-        let mut traj_buf  = Vec::with_capacity(count);
-        let mut jumps_buf = Vec::with_capacity(count);
-        for _ in 0..count {
-            let (traj, jtimes) = simulate_spin_jump_cm(omega, gamma, dt, total_time);
-            traj_buf.push(traj);
-            jumps_buf.push(jtimes);
-        }
-
-        // write trajectories
-        let path_t = format!("{}/trajectory_chunk_{}.csv", cm_dir, chunk_idx);
-        let mut ft = File::create(&path_t).expect("CM traj chunk create failed");
-        writeln!(ft, "traj_id,time,state").unwrap();
-        for (local_id, traj) in traj_buf.iter().enumerate() {
-            let gid = start + local_id;
-            for (i, &state) in traj.iter().enumerate() {
-                let t = i as f64 * dt;
-                writeln!(ft, "{},{:.6},{:.6}", gid, t, state).unwrap();
-            }
-        }
-
-        // write jumps
-        let path_j = format!("{}/jumps_chunk_{}.csv", cm_dir, chunk_idx);
-        let mut fj = File::create(&path_j).expect("CM jumps chunk create failed");
-        writeln!(fj, "traj_id,jump_time").unwrap();
-        for (local_id, times) in jumps_buf.iter().enumerate() {
-            let gid = start + local_id;
-            for &t in times.iter() {
-                writeln!(fj, "{},{}", gid, t).unwrap();
-            }
-        }
-    });
-
-    // ─── RJ: simulate & write in chunks ───────────────────────────────────────
-    (0..rj_chunks).into_par_iter().for_each(|chunk_idx| {
-        let start = chunk_idx * chunk_size;
-        let end   = ((chunk_idx + 1) * chunk_size).min(num_trajectories);
-        let count = end - start;
-
-        let mut traj_buf  = Vec::with_capacity(count);
-        let mut jumps_buf = Vec::with_capacity(count);
-        for _ in 0..count {
-            let (traj, jtimes) = simulate_spin_jump_rj(omega, gamma, dt, total_time);
-            traj_buf.push(traj);
-            jumps_buf.push(jtimes);
-        }
-
-        // write trajectories
-        let path_t = format!("{}/trajectory_chunk_{}.csv", rj_dir, chunk_idx);
-        let mut ft = File::create(&path_t).expect("RJ traj chunk create failed");
-        writeln!(ft, "traj_id,time,state").unwrap();
-        for (local_id, traj) in traj_buf.iter().enumerate() {
-            let gid = start + local_id;
-            for (i, &state) in traj.iter().enumerate() {
-                let t = i as f64 * dt;
-                writeln!(ft, "{},{:.6},{:.6}", gid, t, state).unwrap();
-            }
-        }
-
-        // write jumps
-        let path_j = format!("{}/jumps_chunk_{}.csv", rj_dir, chunk_idx);
-        let mut fj = File::create(&path_j).expect("RJ jumps chunk create failed");
-        writeln!(fj, "traj_id,jump_time").unwrap();
-        for (local_id, times) in jumps_buf.iter().enumerate() {
-            let gid = start + local_id;
-            for &t in times.iter() {
-                writeln!(fj, "{},{}", gid, t).unwrap();
-            }
-        }
-    });
-
-    // ─── Read back CM data from chunks ────────────────────────────────────────
-    let mut trajectories_cm = vec![Vec::new(); num_trajectories];
-    let mut times_jumps_cm  = vec![Vec::new(); num_trajectories];
-
-    for chunk_idx in 0..cm_chunks {
-        // trajectories
-        let path = format!("{}/trajectory_chunk_{}.csv", cm_dir, chunk_idx);
-        let mut rdr = ReaderBuilder::new().has_headers(true).from_path(&path)?;
-        for rec in rdr.records() {
-            let row = rec?;
-            let id: usize = row[0].parse()?;
-            let state: f64 = row[2].parse()?;
-            trajectories_cm[id].push(state);
-        }
-        // jumps
-        let path = format!("{}/jumps_chunk_{}.csv", cm_dir, chunk_idx);
-        let mut rdr = ReaderBuilder::new().has_headers(true).from_path(&path)?;
-        for rec in rdr.records() {
-            let row = rec?;
-            let id: usize = row[0].parse()?;
-            let t:  f64   = row[1].parse()?;
-            times_jumps_cm[id].push(t);
-        }
-    }
-
-    // ─── Read back RJ data from chunks ────────────────────────────────────────
-    let mut trajectories_rj = vec![Vec::new(); num_trajectories];
-    let mut times_jumps_rj  = vec![Vec::new(); num_trajectories];
-
-    for chunk_idx in 0..rj_chunks {
-        // trajectories
-        let path = format!("{}/trajectory_chunk_{}.csv", rj_dir, chunk_idx);
-        let mut rdr = ReaderBuilder::new().has_headers(true).from_path(&path)?;
-        for rec in rdr.records() {
-            let row = rec?;
-            let id: usize = row[0].parse()?;
-            let state: f64 = row[2].parse()?;
-            trajectories_rj[id].push(state);
-        }
-        // jumps
-        let path = format!("{}/jumps_chunk_{}.csv", rj_dir, chunk_idx);
-        let mut rdr = ReaderBuilder::new().has_headers(true).from_path(&path)?;
-        for rec in rdr.records() {
-            let row = rec?;
-            let id: usize = row[0].parse()?;
-            let t:  f64   = row[1].parse()?;
-            times_jumps_rj[id].push(t);
-        }
-    }
-
-    // Lindblad average trajectory
     let lindblad_avg: Vec<f64> = lindblad_simulation(omega, gamma, dt, total_time);
+    
+    let pb_ticks_rj = ProgressBar::new(num_trajectories as u64);
+    pb_ticks_rj.set_style(
+        ProgressStyle::default_bar()
+            .template("Analyzing RJ waiting times: [{bar:40.magenta/black}] {pos}/{len} ({eta})")
+            .unwrap(),
+    );
 
-    // Compute waiting times and flatten & sort
-    let mut flat_waits_cm: Vec<f64> = times_jumps_cm
+    let all_waiting_times_rj: Vec<Vec<f64>> = times_jumps_rj
         .par_iter()
-        .flat_map(|times| analyze_waiting_times(&compute_tick_times(times, m)))
+        .map_init(|| pb_ticks_rj.clone(), |pb, times| {
+            let ticks = compute_tick_times(times, m);
+            pb.inc(1);
+            analyze_waiting_times(&ticks)
+        })
         .collect();
-    flat_waits_cm.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    pb_ticks_rj.finish_with_message("RJ waiting time analysis complete");
 
-    let average_cm = flat_waits_cm.iter().copied().sum::<f64>() / flat_waits_cm.len() as f64;
-    let variance_cm = flat_waits_cm.iter().map(|x| (x - average_cm).powi(2)).sum::<f64>() / flat_waits_cm.len() as f64;
-
-    let accuracy_cm: f64 = average_cm.powi(2) / variance_cm;
-    let resolution_cm: f64 = 1.0 / average_cm;
-
-    println!("CM Accuracy: {}, Resolution: {}", accuracy_cm, resolution_cm);
-
-    let mut flat_waits_rj: Vec<f64> = times_jumps_rj
-        .par_iter()
-        .flat_map(|times| analyze_waiting_times(&compute_tick_times(times, m)))
+    let mut flat_waits_rj: Vec<f64> = all_waiting_times_rj
+        .into_par_iter()
+        .flatten()
         .collect();
     flat_waits_rj.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
-    let average_rj = flat_waits_rj.iter().copied().sum::<f64>() / flat_waits_rj.len() as f64;
-    let variance_rj = flat_waits_rj.iter().map(|x| (x - average_rj).powi(2)).sum::<f64>() / flat_waits_rj.len() as f64;
+    let pb_ticks_cm = ProgressBar::new(num_trajectories as u64);
+    pb_ticks_cm.set_style(
+        ProgressStyle::default_bar()
+            .template("Analyzing CM waiting times: [{bar:40.yellow/black}] {pos}/{len} ({eta})")
+            .unwrap(),
+    );
 
-    let accuracy_rj: f64 = average_rj.powi(2) / variance_rj;
-    let resolution_rj: f64 = 1.0 / average_rj;
+    let all_waiting_times_cm: Vec<Vec<f64>> = times_jumps_cm
+        .par_iter()
+        .map_init(|| pb_ticks_cm.clone(), |pb, times| {
+            let ticks = compute_tick_times(times, m);
+            pb.inc(1);
+            analyze_waiting_times(&ticks)
+        })
+        .collect();
+    pb_ticks_cm.finish_with_message("CM waiting time analysis complete");
+    
+    let mut flat_waits_cm: Vec<f64> = all_waiting_times_cm
+        .into_par_iter()
+        .flatten()
+        .collect();
+    flat_waits_cm.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
-    println!("CM Accuracy: {}, Resolution: {}", accuracy_rj, resolution_rj);
-
-    // Histogram binning
     let bin_width_cm = bin_width(&flat_waits_cm);
     let bin_width_rj = bin_width(&flat_waits_rj);
 
     let counts_cm = counts_per_bin(&flat_waits_cm, bin_width_cm, 0.0, total_time);
     let counts_rj = counts_per_bin(&flat_waits_rj, bin_width_rj, 0.0, total_time);
 
-    // Plot histograms
-    let filename_cm = format!(
-        "histogram_cm_omega-{}_gamma-{}_dt-{}_ntraj-{}.png",
-        omega, gamma, dt, num_trajectories
-    );
+    let filename_cm = format!("histogram_cm_omega-{}_gamma-{}_dt-{}_ntraj-{}.png", omega, gamma, dt, num_trajectories);
     plot_histogram(&counts_cm, bin_width_cm, 0.0, total_time, &filename_cm)?;
-
-    let filename_rj = format!(
-        "histogram_rj_omega-{}_gamma-{}_dt-{}_ntraj-{}.png",
-        omega, gamma, dt, num_trajectories
-    );
+    
+    let filename_rj = format!("histogram_rj_omega-{}_gamma-{}_dt-{}_ntraj-{}.png", omega, gamma, dt, num_trajectories);
     plot_histogram(&counts_rj, bin_width_rj, 0.0, total_time, &filename_rj)?;
 
-    // Compute average trajectories
     let flat_cm: Vec<f64> = trajectories_cm.into_iter().flatten().collect();
     let data_cm = Array2::from_shape_vec((num_trajectories, steps), flat_cm)?;
-
+    
     let flat_rj: Vec<f64> = trajectories_rj.into_iter().flatten().collect();
     let data_rj = Array2::from_shape_vec((num_trajectories, steps), flat_rj)?;
 
     let avg_cm: Array1<f64> = data_cm.mean_axis(Axis(0)).unwrap();
     let avg_rj: Array1<f64> = data_rj.mean_axis(Axis(0)).unwrap();
+    
+    let min: f64 = avg_cm.mean().unwrap() - avg_cm.var(0.0).sqrt();
+    let max: f64 = avg_rj.mean().unwrap() + avg_rj.var(0.0).sqrt();
+    println!("CM average trajectory: {}", avg_cm.mean().unwrap());
+    println!("CM average trajectory std: {}", avg_cm.var(0.0).sqrt());
 
-    // Plot average trajectories
-    let filename = format!(
-        "plot_omega-{}_gamma-{}_dt-{}_ntraj-{}.png",
-        omega, gamma, dt, num_trajectories
-    );
-    plot_trajectory_avg(avg_cm, avg_rj, lindblad_avg, steps, &filename)?;
-
+    println!("RJ average trajectory: {}", avg_rj.mean().unwrap());
+    println!("RJ average trajectory std: {}", avg_rj.var(0.0).sqrt());
+    
+    let filename = format!("plot_omega-{}_gamma-{}_dt-{}_ntraj-{}.png", omega, gamma, dt, num_trajectories);
+    plot_trajectory_avg(avg_cm, avg_rj, lindblad_avg, steps, &filename, min, max)?;
+    
     println!("Simulation completed successfully!");
     println!("Generated files: {}, {}, {}", filename_cm, filename_rj, filename);
     Ok(())
@@ -652,6 +617,310 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 
 
+
+
+
+
+// fn clean_directory(dir: &str) -> std::io::Result<()> {
+//     if Path::new(dir).exists() {
+//         for entry in fs::read_dir(dir)? {
+//             let entry = entry?;
+//             let path = entry.path();
+//             if path.is_file() {
+//                 remove_file(path)?;
+//             }
+//         }
+//     }
+//     Ok(())
+// }
+
+
+// // With CHUNKS and PROGRESS BARS
+// fn main() -> Result<(), Box<dyn std::error::Error>> {
+//     // Simulation parameters
+//     let omega: f64 = 10.0;
+//     let gamma: f64 = 7.0;
+//     let dt: f64 = 0.001;
+//     let total_time: f64 = 30.0;
+//     let num_trajectories: usize = 500;
+//     let m: usize = 10;
+
+//     // chunking
+//     let chunk_size: usize = 500;
+//     let cm_chunks = (num_trajectories + chunk_size - 1) / chunk_size;
+//     let rj_chunks = cm_chunks;
+
+//     // precompute steps
+//     let steps: usize = (total_time / dt).ceil() as usize;
+
+//     // ─── Prepare directories ──────────────────────────────────────────────────
+//     let base_dir = "trajectories";
+//     let cm_dir   = format!("{}/cm", base_dir);
+//     let rj_dir   = format!("{}/rj", base_dir);
+
+//     // clean & recreate
+//     clean_directory(&cm_dir)?;
+//     clean_directory(&rj_dir)?;
+    
+//     create_dir_all(&cm_dir)?;
+//     create_dir_all(&rj_dir)?;
+
+//     // ─── Setup progress bars ──────────────────────────────────────────────────
+//     let multi_progress = MultiProgress::new();
+    
+//     let cm_pb = multi_progress.add(ProgressBar::new(cm_chunks as u64));
+//     cm_pb.set_style(ProgressStyle::default_bar()
+//         .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} CM chunks ({eta})")
+//         .unwrap()
+//         .progress_chars("#>-"));
+//     cm_pb.set_message("CM simulation");
+
+//     let rj_pb = multi_progress.add(ProgressBar::new(rj_chunks as u64));
+//     rj_pb.set_style(ProgressStyle::default_bar()
+//         .template("{spinner:.green} [{elapsed_precise}] [{bar:40.magenta/blue}] {pos}/{len} RJ chunks ({eta})")
+//         .unwrap()
+//         .progress_chars("#>-"));
+//     rj_pb.set_message("RJ simulation");
+
+//     // ─── CM: simulate & write in chunks ───────────────────────────────────────
+//     println!("Starting CM simulation...");
+//     (0..cm_chunks).into_par_iter().for_each(|chunk_idx| {
+//         let start = chunk_idx * chunk_size;
+//         let end   = ((chunk_idx + 1) * chunk_size).min(num_trajectories);
+//         let count = end - start;
+
+//         let mut traj_buf  = Vec::with_capacity(count);
+//         let mut jumps_buf = Vec::with_capacity(count);
+//         for _ in 0..count {
+//             let (traj, jtimes) = simulate_spin_jump_cm(omega, gamma, dt, total_time);
+//             traj_buf.push(traj);
+//             jumps_buf.push(jtimes);
+//         }
+
+//         // write trajectories
+//         let path_t = format!("{}/trajectory_chunk_{}.csv", cm_dir, chunk_idx);
+//         let mut ft = File::create(&path_t).expect("CM traj chunk create failed");
+//         writeln!(ft, "traj_id,time,state").unwrap();
+//         for (local_id, traj) in traj_buf.iter().enumerate() {
+//             let gid = start + local_id;
+//             for (i, &state) in traj.iter().enumerate() {
+//                 let t = i as f64 * dt;
+//                 writeln!(ft, "{},{:.6},{:.6}", gid, t, state).unwrap();
+//             }
+//         }
+
+//         // write jumps
+//         let path_j = format!("{}/jumps_chunk_{}.csv", cm_dir, chunk_idx);
+//         let mut fj = File::create(&path_j).expect("CM jumps chunk create failed");
+//         writeln!(fj, "traj_id,jump_time").unwrap();
+//         for (local_id, times) in jumps_buf.iter().enumerate() {
+//             let gid = start + local_id;
+//             for &t in times.iter() {
+//                 writeln!(fj, "{},{}", gid, t).unwrap();
+//             }
+//         }
+
+//         // Update progress
+//         cm_pb.inc(1);
+//     });
+//     cm_pb.finish_with_message("CM simulation completed");
+
+//     // ─── RJ: simulate & write in chunks ───────────────────────────────────────
+//     println!("Starting RJ simulation...");
+//     (0..rj_chunks).into_par_iter().for_each(|chunk_idx| {
+//         let start = chunk_idx * chunk_size;
+//         let end   = ((chunk_idx + 1) * chunk_size).min(num_trajectories);
+//         let count = end - start;
+
+//         let mut traj_buf  = Vec::with_capacity(count);
+//         let mut jumps_buf = Vec::with_capacity(count);
+//         for _ in 0..count {
+//             let (traj, jtimes) = simulate_spin_jump_rj(omega, gamma, dt, total_time);
+//             traj_buf.push(traj);
+//             jumps_buf.push(jtimes);
+//         }
+
+//         // write trajectories
+//         let path_t = format!("{}/trajectory_chunk_{}.csv", rj_dir, chunk_idx);
+//         let mut ft = File::create(&path_t).expect("RJ traj chunk create failed");
+//         writeln!(ft, "traj_id,time,state").unwrap();
+//         for (local_id, traj) in traj_buf.iter().enumerate() {
+//             let gid = start + local_id;
+//             for (i, &state) in traj.iter().enumerate() {
+//                 let t = i as f64 * dt;
+//                 writeln!(ft, "{},{:.6},{:.6}", gid, t, state).unwrap();
+//             }
+//         }
+
+//         // write jumps
+//         let path_j = format!("{}/jumps_chunk_{}.csv", rj_dir, chunk_idx);
+//         let mut fj = File::create(&path_j).expect("RJ jumps chunk create failed");
+//         writeln!(fj, "traj_id,jump_time").unwrap();
+//         for (local_id, times) in jumps_buf.iter().enumerate() {
+//             let gid = start + local_id;
+//             for &t in times.iter() {
+//                 writeln!(fj, "{},{}", gid, t).unwrap();
+//             }
+//         }
+
+//         // Update progress
+//         rj_pb.inc(1);
+//     });
+//     rj_pb.finish_with_message("RJ simulation completed");
+
+//     // ─── Reading data back with progress bars ─────────────────────────────────
+//     let read_pb = multi_progress.add(ProgressBar::new((cm_chunks + rj_chunks) as u64));
+//     read_pb.set_style(ProgressStyle::default_bar()
+//         .template("{spinner:.green} [{elapsed_precise}] [{bar:40.yellow/blue}] {pos}/{len} Reading chunks ({eta})")
+//         .unwrap()
+//         .progress_chars("#>-"));
+//     read_pb.set_message("Reading data");
+
+//     // ─── Read back CM data from chunks ────────────────────────────────────────
+//     let mut trajectories_cm = vec![Vec::new(); num_trajectories];
+//     let mut times_jumps_cm  = vec![Vec::new(); num_trajectories];
+
+//     for chunk_idx in 0..cm_chunks {
+//         // trajectories
+//         let path = format!("{}/trajectory_chunk_{}.csv", cm_dir, chunk_idx);
+//         let mut rdr = ReaderBuilder::new().has_headers(true).from_path(&path)?;
+//         for rec in rdr.records() {
+//             let row = rec?;
+//             let id: usize = row[0].parse()?;
+//             let state: f64 = row[2].parse()?;
+//             trajectories_cm[id].push(state);
+//         }
+//         // jumps
+//         let path = format!("{}/jumps_chunk_{}.csv", cm_dir, chunk_idx);
+//         let mut rdr = ReaderBuilder::new().has_headers(true).from_path(&path)?;
+//         for rec in rdr.records() {
+//             let row = rec?;
+//             let id: usize = row[0].parse()?;
+//             let t:  f64   = row[1].parse()?;
+//             times_jumps_cm[id].push(t);
+//         }
+//         read_pb.inc(1);
+//     }
+
+//     // ─── Read back RJ data from chunks ────────────────────────────────────────
+//     let mut trajectories_rj = vec![Vec::new(); num_trajectories];
+//     let mut times_jumps_rj  = vec![Vec::new(); num_trajectories];
+
+//     for chunk_idx in 0..rj_chunks {
+//         // trajectories
+//         let path = format!("{}/trajectory_chunk_{}.csv", rj_dir, chunk_idx);
+//         let mut rdr = ReaderBuilder::new().has_headers(true).from_path(&path)?;
+//         for rec in rdr.records() {
+//             let row = rec?;
+//             let id: usize = row[0].parse()?;
+//             let state: f64 = row[2].parse()?;
+//             trajectories_rj[id].push(state);
+//         }
+//         // jumps
+//         let path = format!("{}/jumps_chunk_{}.csv", rj_dir, chunk_idx);
+//         let mut rdr = ReaderBuilder::new().has_headers(true).from_path(&path)?;
+//         for rec in rdr.records() {
+//             let row = rec?;
+//             let id: usize = row[0].parse()?;
+//             let t:  f64   = row[1].parse()?;
+//             times_jumps_rj[id].push(t);
+//         }
+//         read_pb.inc(1);
+//     }
+//     read_pb.finish_with_message("Data reading completed");
+
+//     // ─── Analysis with progress bar ───────────────────────────────────────────
+//     let analysis_pb = multi_progress.add(ProgressBar::new_spinner());
+//     analysis_pb.set_style(ProgressStyle::default_spinner()
+//         .template("{spinner:.green} [{elapsed_precise}] {msg}")
+//         .unwrap());
+//     analysis_pb.set_message("Running Lindblad simulation...");
+
+//     // Lindblad average trajectory
+//     let lindblad_avg: Vec<f64> = lindblad_simulation(omega, gamma, dt, total_time);
+//     analysis_pb.set_message("Computing waiting times...");
+
+//     // Compute waiting times and flatten & sort
+//     let mut flat_waits_cm: Vec<f64> = times_jumps_cm
+//         .par_iter()
+//         .flat_map(|times| analyze_waiting_times(&compute_tick_times(times, m)))
+//         .collect();
+//     flat_waits_cm.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+//     let average_cm = flat_waits_cm.iter().copied().sum::<f64>() / flat_waits_cm.len() as f64;
+//     let variance_cm = flat_waits_cm.iter().map(|x| (x - average_cm).powi(2)).sum::<f64>() / flat_waits_cm.len() as f64;
+
+//     let accuracy_cm: f64 = average_cm.powi(2) / variance_cm;
+//     let resolution_cm: f64 = 1.0 / average_cm;
+
+//     println!("CM Accuracy: {}, Resolution: {}", accuracy_cm, resolution_cm);
+
+//     let mut flat_waits_rj: Vec<f64> = times_jumps_rj
+//         .par_iter()
+//         .flat_map(|times| analyze_waiting_times(&compute_tick_times(times, m)))
+//         .collect();
+//     flat_waits_rj.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+//     let average_rj = flat_waits_rj.iter().copied().sum::<f64>() / flat_waits_rj.len() as f64;
+//     let variance_rj = flat_waits_rj.iter().map(|x| (x - average_rj).powi(2)).sum::<f64>() / flat_waits_rj.len() as f64;
+
+//     let accuracy_rj: f64 = average_rj.powi(2) / variance_rj;
+//     let resolution_rj: f64 = 1.0 / average_rj;
+
+//     println!("RJ Accuracy: {}, Resolution: {}", accuracy_rj, resolution_rj);
+
+//     analysis_pb.set_message("Creating histograms...");
+
+//     // Histogram binning
+//     let bin_width_cm = bin_width(&flat_waits_cm);
+//     let bin_width_rj = bin_width(&flat_waits_rj);
+
+//     let counts_cm = counts_per_bin(&flat_waits_cm, bin_width_cm, 0.0, total_time);
+//     let counts_rj = counts_per_bin(&flat_waits_rj, bin_width_rj, 0.0, total_time);
+
+//     // Plot histograms
+//     let filename_cm = format!(
+//         "histogram_cm_omega-{}_gamma-{}_dt-{}_ntraj-{}.png",
+//         omega, gamma, dt, num_trajectories
+//     );
+//     plot_histogram(&counts_cm, bin_width_cm, 0.0, total_time, &filename_cm)?;
+
+//     let filename_rj = format!(
+//         "histogram_rj_omega-{}_gamma-{}_dt-{}_ntraj-{}.png",
+//         omega, gamma, dt, num_trajectories
+//     );
+//     plot_histogram(&counts_rj, bin_width_rj, 0.0, total_time, &filename_rj)?;
+
+//     analysis_pb.set_message("Computing averages and plotting...");
+
+//     // Compute average trajectories
+//     let flat_cm: Vec<f64> = trajectories_cm.into_iter().flatten().collect();
+//     let data_cm = Array2::from_shape_vec((num_trajectories, steps), flat_cm)?;
+
+//     let flat_rj: Vec<f64> = trajectories_rj.into_iter().flatten().collect();
+//     let data_rj = Array2::from_shape_vec((num_trajectories, steps), flat_rj)?;
+
+//     let avg_cm: Array1<f64> = data_cm.mean_axis(Axis(0)).unwrap();
+//     let avg_rj: Array1<f64> = data_rj.mean_axis(Axis(0)).unwrap();
+
+//     // Plot average trajectories
+//     let filename = format!(
+//         "plot_omega-{}_gamma-{}_dt-{}_ntraj-{}.png",
+//         omega, gamma, dt, num_trajectories
+//     );
+//     plot_trajectory_avg(avg_cm, avg_rj, lindblad_avg, steps, &filename)?;
+
+//     analysis_pb.finish_with_message("Analysis completed");
+
+//     println!("Simulation completed successfully!");
+//     println!("Generated files: {}, {}, {}", filename_cm, filename_rj, filename);
+//     Ok(())
+// }
+
+
+
+
+// // No CHUNKS NO wirte files NO prograss bars
 // fn main() -> Result<(), Box<dyn std::error::Error>>{
 //     let omega: f64 = 1.7;
 //     let gamma: f64 = 0.1;
