@@ -108,80 +108,82 @@ fn steady_state(gamma: f64, omega: f64) -> (Array2<Complex64>, Array1<Complex64>
 }
 
 
-fn simulate_spin_jump_cm(
-    omega: f64,
-    gamma: f64,
-    dt: f64,
-    total_time: f64,
-) -> (Vec<f64>, Vec<f64>) {
+// fn simulate_spin_jump_cm(
+//     omega: f64,
+//     gamma: f64,
+//     dt: f64,
+//     total_time: f64,
+// ) -> (Vec<f64>, Vec<f64>) {
 
-    let sigma_x = gen_sigma_x();
+//     let sigma_x = gen_sigma_x();
 
-    let sigma_z = gen_sigma_z();
+//     let sigma_z = gen_sigma_z();
 
-    let sigma_plus = gen_sigma_x().mapv(|e| e * Complex64::new(0.5, 0.0)) + gen_sigma_y().mapv(|e| e * Complex64::new(0.0, 0.5)) ;
+//     let sigma_plus = gen_sigma_x().mapv(|e| e * Complex64::new(0.5, 0.0)) + gen_sigma_y().mapv(|e| e * Complex64::new(0.0, 0.5)) ;
 
-    let sigma_minus = gen_sigma_x().mapv(|e| e * Complex64::new(0.5, 0.0)) - gen_sigma_y().mapv(|e| e * Complex64::new(0.0, 0.5)) ;
+//     let sigma_minus = gen_sigma_x().mapv(|e| e * Complex64::new(0.5, 0.0)) - gen_sigma_y().mapv(|e| e * Complex64::new(0.0, 0.5)) ;
 
-    let steps = (total_time / dt).ceil() as usize;
+//     let steps = (total_time / dt).ceil() as usize;
 
-    // Initialize the state vector psi
-    let (_, psi1, psi2, eigvals) = steady_state(gamma, omega);
-    let mut rng = rand::thread_rng();
-    let i = if rng.gen::<f64>() < eigvals[0] { 0 } else { 1 };
-    let mut psi;
+//     // Initialize the state vector psi
+//     let (_, psi1, psi2, eigvals) = steady_state(gamma, omega);
+//     let mut rng = rand::thread_rng();
+//     let i = if rng.gen::<f64>() < eigvals[0] { 0 } else { 1 };
+//     let mut psi;
         
-    if i == 0 {
-        psi = psi1;
-        psi /= psi.mapv(|e| e.conj()).dot(&psi).sqrt();
-    } else {
-        psi = psi2;
-        psi /= psi.mapv(|e| e.conj()).dot(&psi).sqrt();
-    }
+//     if i == 0 {
+//         psi = psi1;
+//         psi /= psi.mapv(|e| e.conj()).dot(&psi).sqrt();
+//     } else {
+//         psi = psi2;
+//         psi /= psi.mapv(|e| e.conj()).dot(&psi).sqrt();
+//     }
 
-    let mut sz_exp = Vec::with_capacity(steps);
+//     let mut sz_exp = Vec::with_capacity(steps);
 
-    let mut time_jumps:Vec<f64> = Vec::new();
+//     let mut time_jumps:Vec<f64> = Vec::new();
 
-    let sigma_pm = sigma_plus.dot(&sigma_minus);
-    let h_eff = sigma_x.mapv(|e| e * omega) - sigma_pm.mapv(|e| e * (gamma * Complex64::new(0.0, 0.5)));
+//     let sigma_pm = sigma_plus.dot(&sigma_minus);
+//     let h_eff = sigma_x.mapv(|e| e * omega) - sigma_pm.mapv(|e| e * (gamma * Complex64::new(0.0, 0.5)));
 
-    for i in 0..steps {
-        let amp = psi.mapv(|x| x.conj()).dot(&sigma_pm.dot(&psi)).re;
-        let p_jump = gamma * amp * dt;
-        let dpsi_nh = (&psi.mapv(|e| e * (gamma * amp * 0.5))
-            - &(h_eff.dot(&psi).mapv(|e| Complex64::new(0.0, 1.0) * e)))
-            .mapv(|e| e * dt);
+//     for i in 0..steps {
+//         let amp = psi.mapv(|x| x.conj()).dot(&sigma_pm.dot(&psi)).re;
+//         let p_jump = gamma * amp * dt;
+//         let dpsi_nh = (&psi.mapv(|e| e * (gamma * amp * 0.5))
+//             - &(h_eff.dot(&psi).mapv(|e| Complex64::new(0.0, 1.0) * e)))
+//             .mapv(|e| e * dt);
 
-        if rng.gen::<f64>() <= p_jump {
-            let norm_factor = amp.sqrt();
-            psi = sigma_minus.dot(&psi).mapv(|e| e * (1. / norm_factor));
-            time_jumps.push(i as f64 * dt); 
-        }
+//         if rng.gen::<f64>() <= p_jump {
+//             let norm_factor = amp.sqrt();
+//             psi = sigma_minus.dot(&psi).mapv(|e| e * (1. / norm_factor));
+//             time_jumps.push(i as f64 * dt); 
+//         }
 
-        psi = &psi + &dpsi_nh;
-        let norm = psi.mapv(|x| x.conj()).dot(&psi).re.sqrt();
-        psi = psi.mapv(|e| e / norm);
+//         psi = &psi + &dpsi_nh;
+//         let norm = psi.mapv(|x| x.conj()).dot(&psi).re.sqrt();
+//         psi = psi.mapv(|e| e / norm);
 
-        let szz = psi.mapv(|x| x.conj()).dot(&sigma_z.dot(&psi)).re;
-        sz_exp.push(szz);
-    }
+//         let szz = psi.mapv(|x| x.conj()).dot(&sigma_z.dot(&psi)).re;
+//         sz_exp.push(szz);
+//     }
 
-    // println!("CM simulation completed with {} jumps.", time_jumps.len());
+//     // println!("CM simulation completed with {} jumps.", time_jumps.len());
 
-    (sz_exp, time_jumps)
-}
+//     (sz_exp, time_jumps)
+// }
 
 fn simulate_spin_jump_rj(
     omega: f64,
     gamma: f64,
     dt: f64,
     total_time: f64,
-) -> (Vec<f64>, Vec<f64>) {
+) -> (Vec<f64>, Vec<f64>, Vec<Array1<Complex64>>) {
     let max_steps = (total_time / dt).ceil() as usize;
+
     let mut sz_exp = Vec::with_capacity(max_steps);
 
     let mut time_jumps:Vec<f64> = Vec::new();
+    let mut wfs = Vec::new();
 
     let sigma_x = gen_sigma_x();
 
@@ -210,16 +212,13 @@ fn simulate_spin_jump_rj(
 
     let mut p0 = 1.0;
     let mut r = rng.gen::<f64>();
-    let mut nh_evol = true;
 
     for i in 0..max_steps {
-        if nh_evol {
-            r = rng.gen();
-            p0 = 1.0;
-            nh_evol = false;
-        }
 
         let amp = psi.mapv(|x| x.conj()).dot(&sigma_pm.dot(&psi)).re;
+
+        let prob = gamma * amp * dt;
+
         let dpsi_nh = (&psi.mapv(|e| e * (gamma * amp * 0.5))
             - &(h_eff.dot(&psi).mapv(|e| Complex64::new(0.0, 1.0) * e)))
             .mapv(|e| e * dt);
@@ -227,24 +226,30 @@ fn simulate_spin_jump_rj(
         if r >= p0 {
             let norm_factor = amp.sqrt();
             psi = sigma_minus.dot(&psi).mapv(|e| e * (1. / norm_factor));
-            time_jumps.push(i as f64 * dt); 
-            nh_evol = true;
+            psi = &psi + &dpsi_nh;
+
+            psi /= psi.mapv(|x| x.conj()).dot(&psi).sqrt();
+
+            r = rng.gen::<f64>();
+            
+            p0 = 1.0;
+
+            time_jumps.push(i as f64 * dt);
+            wfs.push(psi.clone()); 
+        } else {
+            psi = &psi + &dpsi_nh;
+            psi /= psi.mapv(|x| x.conj()).dot(&psi).sqrt();
         }
 
-        psi = &psi + &dpsi_nh;
-        let norm = psi.mapv(|x| x.conj()).dot(&psi).re.sqrt();
-        psi.mapv_inplace(|e| e / norm);
+        p0 *= 1.0 - prob;
 
         let szz = psi.mapv(|x| x.conj()).dot(&sigma_z.dot(&psi)).re;
         sz_exp.push(szz);
-
-        let p_jump = gamma * amp * dt;
-        p0 *= 1.0 - p_jump;
     }
 
     // println!("CM simulation completed with {} jumps.", time_jumps.len());
 
-    (sz_exp, time_jumps)
+    (sz_exp, time_jumps, wfs)
 }
 
 
@@ -430,15 +435,12 @@ fn plot_histogram(
 }
 
 fn plot_trajectory_avg(
-    avg_cm: Array1<f64>,
     avg_rj: Array1<f64>,
     lindblad_avg: Vec<f64>,
     steps: usize,
     filename: &str,
     min:f64,
     max:f64,
-    mean_avg_cm:f64,
-    std_cm:f64,
     mean_avg_rj:f64,
     std_rj:f64
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -460,31 +462,31 @@ fn plot_trajectory_avg(
         .label_style(("FiraCode Nerd Font", 30).into_font())
         .draw()?;
 
-    // Draw the average trajectories and their standard deviations following CM algorithm
-    chart.draw_series(LineSeries::new(
-        avg_cm.iter().enumerate().map(|(x, y)| (x, *y)),
-        &BLUE,
-    ))?
-    .label("CM")
-    .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], &BLUE));
+    // // Draw the average trajectories and their standard deviations following CM algorithm
+    // chart.draw_series(LineSeries::new(
+    //     avg_cm.iter().enumerate().map(|(x, y)| (x, *y)),
+    //     &BLUE,
+    // ))?
+    // .label("CM")
+    // .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], &BLUE));
 
-    chart.draw_series(AreaSeries::new(
-        (0..avg_cm.len()).map(|i| (i, mean_avg_cm + std_cm)),    // upper curve
-        mean_avg_cm - std_cm,        // lower constant baseline
-        &BLUE.mix(0.2) // translucent fill
-    ))?
-    .label("±1σ")
-    .legend(|(x, y)| {
-        Rectangle::new(
-            [(x, y - 5), (x + 20, y + 5)],
-            &BLUE.mix(0.2),
-        )
-    });
+    // chart.draw_series(AreaSeries::new(
+    //     (0..avg_cm.len()).map(|i| (i, mean_avg_cm + std_cm)),    // upper curve
+    //     mean_avg_cm - std_cm,        // lower constant baseline
+    //     &BLUE.mix(0.2) // translucent fill
+    // ))?
+    // .label("±1σ")
+    // .legend(|(x, y)| {
+    //     Rectangle::new(
+    //         [(x, y - 5), (x + 20, y + 5)],
+    //         &BLUE.mix(0.2),
+    //     )
+    // });
 
     // Draw the average trajectories and their standard deviations following RJ algorithm
     chart.draw_series(LineSeries::new(
         avg_rj.iter().enumerate().map(|(x, y)| (x, *y)),
-        &RED,
+        &BLUE,
     ))?
     .label("RJ")
     .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], &RED));
@@ -492,13 +494,13 @@ fn plot_trajectory_avg(
     chart.draw_series(AreaSeries::new(
         (0..avg_rj.len()).map(|i| (i, mean_avg_rj + std_rj)),    // upper curve
         mean_avg_rj - std_rj,        // lower constant baseline
-        &RED.mix(0.2) // translucent fill
+        &BLUE.mix(0.2) // translucent fill
     ))?
     .label("±1σ")
     .legend(|(x, y)| {
         Rectangle::new(
             [(x, y - 5), (x + 20, y + 5)],
-            &RED.mix(0.2),
+            &BLUE.mix(0.2),
         )
     });
 
@@ -533,23 +535,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let m: usize = 5;
     let steps: usize = (total_time / dt).ceil() as usize;
 
-    // Create and configure progress bar
-    let pb_cm = ProgressBar::new(num_trajectories as u64);
-    pb_cm.set_style(
-        ProgressStyle::default_bar()
-        .template("Running CM: [{bar:40.cyan/blue}] {pos}/{len} ({eta})")
-            .unwrap(),
-    );
+    // // Create and configure progress bar
+    // let pb_cm = ProgressBar::new(num_trajectories as u64);
+    // pb_cm.set_style(
+    //     ProgressStyle::default_bar()
+    //     .template("Running CM: [{bar:40.cyan/blue}] {pos}/{len} ({eta})")
+    //         .unwrap(),
+    // );
 
-    let (trajectories_cm, times_jumps_cm): (Vec<Vec<f64>>, Vec<Vec<f64>>) = (0..num_trajectories)
-        .into_par_iter()
-        .map_init(|| pb_cm.clone(), |pb, _| {
-            let result = simulate_spin_jump_cm(omega, gamma, dt, total_time);
-            pb.inc(1);
-            result
-        })
-        .unzip();
-    pb_cm.finish_with_message("CM simulation complete");
+    // let (trajectories_cm, times_jumps_cm): (Vec<Vec<f64>>, Vec<Vec<f64>>) = (0..num_trajectories)
+    //     .into_par_iter()
+    //     .map_init(|| pb_cm.clone(), |pb, _| {
+    //         let result = simulate_spin_jump_cm(omega, gamma, dt, total_time);
+    //         pb.inc(1);
+    //         result
+    //     })
+    //     .unzip();
+    // pb_cm.finish_with_message("CM simulation complete");
 
     let pb_rj = ProgressBar::new(num_trajectories as u64);
     pb_rj.set_style(
@@ -558,14 +560,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .unwrap(),
     );
 
-    let (trajectories_rj, times_jumps_rj): (Vec<Vec<f64>>, Vec<Vec<f64>>) = (0..num_trajectories)
-    .into_par_iter()
-        .map_init(|| pb_rj.clone(), |pb, _| {
-            let result = simulate_spin_jump_rj(omega, gamma, dt, total_time);
-            pb.inc(1);
-            result
-        })
-        .unzip();
+    // 1) run your parallel sim and collect all the (A,B,C) tuples
+    let results: Vec<(Vec<f64>, Vec<f64>, Vec<Array1<Complex64>>)> = 
+        (0..num_trajectories)
+            .into_par_iter()
+            .map_init(|| pb_rj.clone(), |pb, _| {
+                let res = simulate_spin_jump_rj(omega, gamma, dt, total_time);
+                pb.inc(1);
+                res
+            })
+            .collect();
+
+    // 2) allocate output Vecs up‑front for efficiency
+    let mut trajectories_rj  = Vec::with_capacity(num_trajectories);
+    let mut times_jumps_rj   = Vec::with_capacity(num_trajectories);
+    let mut psi_states_rj    = Vec::with_capacity(num_trajectories);
+
+    // 3) unzip by hand
+    for (traj, times, psi) in results {
+        trajectories_rj.push(traj);
+        times_jumps_rj.push(times);
+        psi_states_rj.push(psi);
+    }
     pb_rj.finish_with_message("RJ simulation complete");
     
     let lindblad_avg: Vec<f64> = lindblad_simulation(omega, gamma, dt, total_time);
@@ -592,6 +608,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .flatten()
         .collect();
     flat_waits_rj.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    
+    let mean_wait = flat_waits_rj.iter().sum::<f64>() / flat_waits_rj.len() as f64;
 
     let pb_ticks_cm = ProgressBar::new(num_trajectories as u64);
     pb_ticks_cm.set_style(
@@ -600,66 +618,65 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .unwrap(),
     );
 
-    let all_waiting_times_cm: Vec<Vec<f64>> = times_jumps_cm
-        .par_iter()
-        .map_init(|| pb_ticks_cm.clone(), |pb, times| {
-            let ticks = compute_tick_times(times, m);
-            pb.inc(1);
-            analyze_waiting_times(&ticks)
-        })
-        .collect();
-    pb_ticks_cm.finish_with_message("CM waiting time analysis complete");
+    // let all_waiting_times_cm: Vec<Vec<f64>> = times_jumps_cm
+    //     .par_iter()
+    //     .map_init(|| pb_ticks_cm.clone(), |pb, times| {
+    //         let ticks = compute_tick_times(times, m);
+    //         pb.inc(1);
+    //         analyze_waiting_times(&ticks)
+    //     })
+    //     .collect();
+    // pb_ticks_cm.finish_with_message("CM waiting time analysis complete");
     
-    let mut flat_waits_cm: Vec<f64> = all_waiting_times_cm
-        .into_par_iter()
-        .flatten()
-        .collect();
+    // let mut flat_waits_cm: Vec<f64> = all_waiting_times_cm
+    //     .into_par_iter()
+    //     .flatten()
+    //     .collect();
     
-    let mean_wait = flat_waits_cm.iter().sum::<f64>() / flat_waits_cm.len() as f64;
 
-    flat_waits_cm.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    // flat_waits_cm.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
-    let bin_width_cm = bin_width(&flat_waits_cm);
+    // let bin_width_cm = bin_width(&flat_waits_cm);
     let bin_width_rj = bin_width(&flat_waits_rj);
 
-    let counts_cm = counts_per_bin(&flat_waits_cm, bin_width_cm, 0.0, total_time);
+    // let counts_cm = counts_per_bin(&flat_waits_cm, bin_width_cm, 0.0, total_time);
     let counts_rj = counts_per_bin(&flat_waits_rj, bin_width_rj, 0.0, total_time);
 
-    let filename_cm = format!("histogram_cm_omega-{}_gamma-{}_dt-{}_ntraj-{}.png", omega, gamma, dt, num_trajectories);
-    plot_histogram(&counts_cm, bin_width_cm, 0.0, total_time, &filename_cm)?;
+    // let filename_cm = format!("histogram_cm_omega-{}_gamma-{}_dt-{}_ntraj-{}.png", omega, gamma, dt, num_trajectories);
+    // plot_histogram(&counts_cm, bin_width_cm, 0.0, total_time, &filename_cm)?;
     
     let filename_rj = format!("histogram_rj_omega-{}_gamma-{}_dt-{}_ntraj-{}.png", omega, gamma, dt, num_trajectories);
     plot_histogram(&counts_rj, bin_width_rj, 0.0, total_time, &filename_rj)?;
 
-    let flat_cm: Vec<f64> = trajectories_cm.into_iter().flatten().collect();
-    let data_cm = Array2::from_shape_vec((num_trajectories, steps), flat_cm)?;
+    // let flat_cm: Vec<f64> = trajectories_cm.into_iter().flatten().collect();
+    // let data_cm = Array2::from_shape_vec((num_trajectories, steps), flat_cm)?;
     
     let flat_rj: Vec<f64> = trajectories_rj.into_iter().flatten().collect();
     let data_rj = Array2::from_shape_vec((num_trajectories, steps), flat_rj)?;
 
-    let avg_cm: Array1<f64> = data_cm.mean_axis(Axis(0)).unwrap();
+    // let avg_cm: Array1<f64> = data_cm.mean_axis(Axis(0)).unwrap();
     let avg_rj: Array1<f64> = data_rj.mean_axis(Axis(0)).unwrap();
     
-    let mean_avg_cm: f64 = avg_cm.mean().unwrap();
+    // let mean_avg_cm: f64 = avg_cm.mean().unwrap();
     let mean_avg_rj: f64 = avg_rj.mean().unwrap();
 
-    let std_cm: f64 = avg_cm.var(0.0).sqrt();
+    // let std_cm: f64 = avg_cm.var(0.0).sqrt();
     let std_rj: f64 = avg_rj.var(0.0).sqrt();
 
-    let min: f64 = avg_cm.mean().unwrap() - 2.5 * (std_cm + std_rj);
-    let max: f64 = avg_cm.mean().unwrap() + 2.5 * (std_cm + std_rj);
+    let min: f64 = avg_rj.mean().unwrap() - 2.5 * std_rj;
+    let max: f64 = avg_rj.mean().unwrap() + 2.5 * std_rj;
     
-    println!("CM average trajectory: {}", avg_cm.mean().unwrap());
-    println!("CM average trajectory std: {}", avg_cm.var(0.0).sqrt());
+    // println!("CM average trajectory: {}", avg_cm.mean().unwrap());
+    // println!("CM average trajectory std: {}", avg_cm.var(0.0).sqrt());
 
     println!("RJ average trajectory: {}", avg_rj.mean().unwrap());
     println!("RJ average trajectory std: {}", avg_rj.var(0.0).sqrt());
     
     let filename = format!("plot_omega-{}_gamma-{}_dt-{}_ntraj-{}.png", omega, gamma, dt, num_trajectories);
-    plot_trajectory_avg(avg_cm, avg_rj, lindblad_avg, steps, &filename, min, max, mean_avg_cm, std_cm, mean_avg_rj, std_rj)?;
+    plot_trajectory_avg(avg_rj, lindblad_avg, steps, &filename, min, max, mean_avg_rj, std_rj)?;
     
     println!("Simulation completed successfully!");
-    println!("Generated files: {}, {}, {}", filename_cm, filename_rj, filename);
+    println!("Generated files: {}, {}", filename_rj, filename);
     Ok(())
 }
 
