@@ -577,8 +577,8 @@ fn plot_trajectory_avg(
 
 // No CHUNKS NO wirte files YES prograss bars
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let omega: f64 = 5.0;
-    let gamma: f64 = 3.0;
+    let omega: f64 = 3.0;
+    let gamma: f64 = 1.0;
     let dt: f64 = 0.001;
     let total_time: f64 = 30.0;
     let num_trajectories: usize = 10000;
