@@ -340,7 +340,7 @@ fn counts_per_bin(
     bin_width: f64,
     min: f64,
     max: f64,
-) -> Vec<usize> {
+) -> Vec<f64> {
     let num_bins = ((max - min) / bin_width).ceil() as usize;
     let mut counts = vec![0; num_bins];
 
@@ -353,7 +353,10 @@ fn counts_per_bin(
         }
     }
 
-    counts
+    let total: f64 = counts.iter().sum::<usize>() as f64;
+    let norm_counts: Vec<f64> = counts.iter().map(|&e| e as f64 / total).collect();
+
+    norm_counts
 }
 
 fn compute_tick_times(times: &Vec<f64>, m: usize) -> Array1<f64> {
@@ -386,7 +389,7 @@ fn analyze_waiting_times(ticks: &Array1<f64>) -> Vec<f64> {
 
 
 fn plot_histogram(
-    counts: &Vec<usize>,
+    counts: &Vec<f64>,
     bin_width: f64,
     min: f64,
     max: f64,
@@ -397,14 +400,14 @@ fn plot_histogram(
     let root = BitMapBackend::new(filename, (1600, 1200)).into_drawing_area();
     root.fill(&WHITE)?;
 
-    let max_count = *counts.iter().max().unwrap_or(&0);
+    let max_count = counts.iter().cloned().fold(0.0_f64, f64::max);
 
     let mut chart = ChartBuilder::on(&root)
         .caption("Histogram", ("FiraCode Nerd Font", 40))
         .margin(30)
         .x_label_area_size(40)
         .y_label_area_size(40)
-        .build_cartesian_2d(min..max, 0..max_count)?;
+        .build_cartesian_2d(min..max, 0.0..max_count)?;
 
     chart.configure_mesh()
         .x_desc("Value")
@@ -417,7 +420,7 @@ fn plot_histogram(
         let x1 = x0 + bin_width;
         chart.draw_series(
             std::iter::once(Rectangle::new(
-                [(x0, 0), (x1, count)],
+                [(x0, 0.0), (x1, count)],
                 BLUE.filled(),
             )),
         )?;
@@ -611,6 +614,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .into_par_iter()
         .flatten()
         .collect();
+    
+    let mean_wait = flat_waits_cm.iter().sum::<f64>() / flat_waits_cm.len() as f64;
+
     flat_waits_cm.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
     let bin_width_cm = bin_width(&flat_waits_cm);
