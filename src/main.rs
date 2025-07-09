@@ -177,7 +177,7 @@ fn simulate_spin_jump_rj(
     gamma: f64,
     dt: f64,
     total_time: f64,
-) -> (Vec<f64>, Vec<f64>, Vec<Array1<Complex64>>) {
+) -> (Vec<f64>, Array1<f64>, Vec<Array1<Complex64>>) {
     let max_steps = (total_time / dt).ceil() as usize;
 
     let mut sz_exp = Vec::with_capacity(max_steps);
@@ -248,6 +248,8 @@ fn simulate_spin_jump_rj(
     }
 
     // println!("CM simulation completed with {} jumps.", time_jumps.len());
+
+    let time_jumps: Array1<f64> = Array1::from(time_jumps);
 
     (sz_exp, time_jumps, wfs)
 }
@@ -364,33 +366,81 @@ fn counts_per_bin(
     norm_counts
 }
 
-fn compute_tick_times(times: &Vec<f64>, m: usize) -> Array1<f64> {
-    let ticks: Vec<f64> = times
-        .iter()
-        .enumerate()
-        .filter_map(|(idx, &t)| {
-            // idx starts at 0, so (idx+1)%m == 0 picks the mᵗʰ, 2mᵗʰ, ...
-            if (idx + 1) % m == 0 {
-                Some(t)
-            } else {
-                None
-            }
-        })
-        .collect();
-    Array1::from(ticks)
+fn compute_tick_times(
+    times: &Array1<f64>,
+    m: usize,
+) -> Array1<usize> {
+    let mut n_acc: usize = 0;
+    let mut aux_ticks = vec![];
+    let mut next_threshold = m;
+
+    for i in 0.. times.len() {
+        n_acc += 1;
+
+        if n_acc >= next_threshold {
+            aux_ticks.push(i);
+            next_threshold += m;
+        }
+    }
+
+    let aux_ticks: Array1<usize> = Array1::from(aux_ticks);
+    aux_ticks
 }
 
-/// Given an Array1<f64> of tick times [t₁, t₂, …], return Vec<f64> of [t₂−t₁, t₃−t₂, …]
-fn analyze_waiting_times(ticks: &Array1<f64>) -> Vec<f64> {
-    let slice = ticks
-        .as_slice()
-        .expect("tick array must be contiguous");
-    slice
-        .windows(2)
-        .map(|w| w[1] - w[0])
-        .collect()
-}
+fn analyze_ticks(
+    times: &Array1<f64>,
+    wfs: &Vec<Array1<Complex64>>,
+    aux_ticks: &Array1<usize>,
+    pi: &Array2<Complex64>,
+) -> (Vec<f64>, Vec<usize>, Vec<f64>) {
+    let mut waiting_times = Vec::new();
+    let mut activity_ticks = Vec::new();
+    let mut entropy_ticks = Vec::new();
 
+    let ticks = aux_ticks.as_slice().expect("aux_ticks must be contiguous");
+
+    for pair in ticks.windows(2) {
+        if pair.len() != 2 {
+            continue; // Skip incomplete pair
+        }
+        let i1 = pair[0];
+        let i2 = pair[1];
+
+        let t1 = times[i1];
+        let t2 = times[i2];
+
+        // let slice_types = &types.slice(s![i1..i2]);
+        // let n_plus = slice_types.iter().filter(|&&k| k == 1).count();
+        // let n_minus = slice_types.iter().filter(|&&k| k == 0).count();
+
+        // let q = omega_c * (n_minus as f64 - n_plus as f64);
+        // let beta_q = beta * q;
+
+        let psi1 = &wfs[i1];
+        let psi2 = &wfs[i2];
+
+        let p1 = {
+            let inner = pi.dot(psi1);
+            let amp = psi1.mapv(|c| c.conj()).dot(&inner).re;
+            amp.clamp(1e-12, 1.0)
+        };
+        let p2 = {
+            let inner = pi.dot(psi2);
+            let amp = psi2.mapv(|c| c.conj()).dot(&inner).re;
+            amp.clamp(1e-12, 1.0)
+        };
+
+        let delta_spsi = p1.ln() - p2.ln();
+        let s_tick = delta_spsi;
+
+        waiting_times.push(t2 - t1);
+        activity_ticks.push(i2 - i1);
+        entropy_ticks.push(s_tick);
+    }
+    
+
+    (waiting_times, activity_ticks, entropy_ticks)
+}
 
 
 fn plot_histogram(
@@ -531,7 +581,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let gamma: f64 = 7.0;
     let dt: f64 = 0.001;
     let total_time: f64 = 30.0;
-    let num_trajectories: usize = 10000;
+    let num_trajectories: usize = 20000;
     let m: usize = 5;
     let steps: usize = (total_time / dt).ceil() as usize;
 
@@ -553,6 +603,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     //     .unzip();
     // pb_cm.finish_with_message("CM simulation complete");
 
+    let (pi, _, _, _) = steady_state(gamma, omega);
+
     let pb_rj = ProgressBar::new(num_trajectories as u64);
     pb_rj.set_style(
         ProgressStyle::default_bar()
@@ -561,7 +613,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // 1) run your parallel sim and collect all the (A,B,C) tuples
-    let results: Vec<(Vec<f64>, Vec<f64>, Vec<Array1<Complex64>>)> = 
+    let results: Vec<(Vec<f64>, Array1<f64>, Vec<Array1<Complex64>>)> = 
         (0..num_trajectories)
             .into_par_iter()
             .map_init(|| pb_rj.clone(), |pb, _| {
@@ -593,30 +645,55 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .unwrap(),
     );
 
-    let all_waiting_times_rj: Vec<Vec<f64>> = times_jumps_rj
-        .par_iter()
-        .map_init(|| pb_ticks_rj.clone(), |pb, times| {
-            let ticks = compute_tick_times(times, m);
-            pb.inc(1);
-            analyze_waiting_times(&ticks)
-        })
-        .collect();
+    let results: Vec<(Vec<f64>, Vec<usize>, Vec<f64>)> =
+        times_jumps_rj
+            .into_par_iter()                        // take ownership of each Vec<f64>
+            .zip(psi_states_rj.into_par_iter())     // pair it with each Vec<Complex64>
+            .map_init(
+                || pb_ticks_rj.clone(),             // make a new PB handle per thread
+                |pb, (times, wfs)| {                // times: Vec<f64>, wfs: Vec<Array1<...>>
+                    let aux = compute_tick_times(&times, m);
+                    pb.inc(1);
+                    analyze_ticks(&times, &wfs, &aux, &pi)
+                },
+            )
+            .collect();
     pb_ticks_rj.finish_with_message("RJ waiting time analysis complete");
 
-    let mut flat_waits_rj: Vec<f64> = all_waiting_times_rj
-        .into_par_iter()
-        .flatten()
-        .collect();
-    flat_waits_rj.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    // Combine all results
+    let mut flat_waits_rj = Vec::new();        // flattened for histogram
+    let mut _activities = Vec::new(); // one avg per trajectory
+    let mut entropies = Vec::new(); // one avg per trajectory
+
+    for (wts, acts, ents) in results {
+        flat_waits_rj.extend(wts); // flatten all waits
+
+        // Average number of actions per trajectory
+        if !acts.is_empty() {
+            let avg_act = acts.iter().map(|x| *x as f64).sum::<f64>();
+            _activities.push(avg_act);
+        }
+
+        entropies.extend(ents); // flatten all entropies
+    }
     
     let mean_wait = flat_waits_rj.iter().sum::<f64>() / flat_waits_rj.len() as f64;
 
-    let pb_ticks_cm = ProgressBar::new(num_trajectories as u64);
-    pb_ticks_cm.set_style(
-        ProgressStyle::default_bar()
-            .template("Analyzing CM waiting times: [{bar:40.yellow/black}] {pos}/{len} ({eta})")
-            .unwrap(),
-    );
+    let arr_ent = Array1::from(entropies); // assuming entropies: Vec<f64>
+
+    let mean_ent = (arr_ent.mapv(|e| (-e).exp()).sum().ln() - 
+        (arr_ent.len() as f64).ln()).exp() ;// Mean of entropies, using log mean
+    let std_dev_ent = arr_ent.std(0.0); // 0.0 = population std dev, use 1.0 for sample std dev
+
+    println!("Mean of entropies: {}", mean_ent);
+
+
+    // let pb_ticks_cm = ProgressBar::new(num_trajectories as u64);
+    // pb_ticks_cm.set_style(
+    //     ProgressStyle::default_bar()
+    //         .template("Analyzing CM waiting times: [{bar:40.yellow/black}] {pos}/{len} ({eta})")
+    //         .unwrap(),
+    // );
 
     // let all_waiting_times_cm: Vec<Vec<f64>> = times_jumps_cm
     //     .par_iter()
@@ -634,7 +711,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     //     .collect();
     
 
-    // flat_waits_cm.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    flat_waits_rj.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
     // let bin_width_cm = bin_width(&flat_waits_cm);
     let bin_width_rj = bin_width(&flat_waits_rj);
