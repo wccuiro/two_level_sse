@@ -577,11 +577,11 @@ fn plot_trajectory_avg(
 
 // No CHUNKS NO wirte files YES prograss bars
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let omega: f64 = 10.0;
-    let gamma: f64 = 7.0;
+    let omega: f64 = 5.0;
+    let gamma: f64 = 3.0;
     let dt: f64 = 0.001;
     let total_time: f64 = 30.0;
-    let num_trajectories: usize = 20000;
+    let num_trajectories: usize = 10000;
     let m: usize = 5;
     let steps: usize = (total_time / dt).ceil() as usize;
 
@@ -628,14 +628,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut times_jumps_rj   = Vec::with_capacity(num_trajectories);
     let mut psi_states_rj    = Vec::with_capacity(num_trajectories);
 
+    let mut len_jumps = Vec::new();
+
     // 3) unzip by hand
     for (traj, times, psi) in results {
         trajectories_rj.push(traj);
+        len_jumps.push(times.len());
         times_jumps_rj.push(times);
         psi_states_rj.push(psi);
     }
     pb_rj.finish_with_message("RJ simulation complete");
     
+    println!("Average number of jumps per trajectory: {}", len_jumps.iter().sum::<usize>() as f64 / num_trajectories as f64);
+
     let lindblad_avg: Vec<f64> = lindblad_simulation(omega, gamma, dt, total_time);
     
     let pb_ticks_rj = ProgressBar::new(num_trajectories as u64);
