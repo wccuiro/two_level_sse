@@ -487,28 +487,18 @@ fn plot_trajectory_avg(
 }
 
 fn plot_entropy_vs_n_traj(
-    entropies_traj: Vec<Vec<f64>>,
+    entropies_traj: Vec<f64>,
     n_traj: Vec<usize>,
     filename: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(entropies_traj.len(), n_traj.len());
-
-    // Compute the transformed entropy values
-    let values: Vec<f64> = entropies_traj
-        .iter()
-        .map(|ent| {
-            let sum_exp_neg = ent.iter().map(|e| (-e).exp()).sum::<f64>();
-            let len = ent.len() as f64;
-            (sum_exp_neg.ln() - len.ln()).exp()
-        })
-        .collect();
 
     // Set up the plot
     let root = BitMapBackend::new(filename, (1600, 1200)).into_drawing_area();
     root.fill(&WHITE)?;
 
     let x_range = *n_traj.iter().min().unwrap() as f64..*n_traj.iter().max().unwrap() as f64;
-    let y_range = values
+    let y_range = entropies_traj
         .iter()
         .cloned()
         .fold(f64::INFINITY..f64::NEG_INFINITY, |acc, v| {
@@ -525,7 +515,7 @@ fn plot_entropy_vs_n_traj(
     chart.configure_mesh().draw()?;
 
     chart.draw_series(LineSeries::new(
-        n_traj.iter().zip(values.iter()).map(|(x, y)| (*x as f64, *y)),
+        n_traj.iter().zip(entropies_traj.iter()).map(|(x, y)| (*x as f64, *y)),
         &RED,
     ))?;
 
@@ -623,7 +613,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     
     // Number of simulations
-    let n_pts = 4_usize;
+    let n_pts = 20_usize;
 
     // // Reference values for the parameters
     // let omega: f64 = 7.0;
@@ -631,8 +621,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // let num_trajectories: usize = 1000;
     // let m: usize = 5;
 
-    let init_omega  = 3.0_f64;
-    let last_omega  = 10.0_f64;
+    let init_omega  = 5.0_f64;
+    let last_omega  = 5.0_f64;
 
     let vec_omega: Vec<f64> = (0..n_pts)
         .map(|i| {
@@ -641,8 +631,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .collect();
     
-    let init_gamma  = 1.0_f64;
-    let last_gamma  = 7.0_f64;
+    let init_gamma  = 5.0_f64;
+    let last_gamma  = 5.0_f64;
 
     let vec_gamma: Vec<f64> = (0..n_pts)
         .map(|i| {
@@ -651,7 +641,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .collect();
 
-    let init_num_trajectories  = 1000_usize;
+    let init_num_trajectories  = 100_usize;
     let last_num_trajectories  = 1000_usize;
 
     let vec_num_trajectories: Vec<usize> = (0..n_pts)
@@ -784,11 +774,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let sum_exp_m_ent = (arr_ent.mapv(|e| (-e).exp()).sum().ln() - 
             (arr_ent.len() as f64).ln()).exp() ;// Mean of entropies, using log mean
-        // let std_dev_ent = arr_ent.std(0.0); // 0.0 = population std dev, use 1.0 for sample std dev
 
         entropys_traj.push(sum_exp_m_ent);
-        // println!("Mean of entropies: {}", mean_ent);
-
     
 
         flat_waits_rj.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -824,6 +811,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let max: f64 = avg_rj.mean().unwrap() + 2.5 * std_rj;
                 
         let filename = format!("plot_omega-{}_gamma-{}_dt-{}_ntraj-{}.png", omega, gamma, dt, num_trajectories);
+        // plot_trajectory_avg(avg_rj, lindblad_avg, steps, &filename, min, max, mean_avg_rj, std_rj)?;
     }
     
     println!("{}", counts_val.len());
@@ -831,6 +819,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("{:?}", entropys_traj);
     println!("{:?}", accuracy_traj);
     println!("{:?}", resolution_traj);
+
+    plot_entropy_vs_n_traj(entropys_traj, vec_num_trajectories, "entropy_vs_n_traj.png")?;
+
     plot_histogram_omega_gamma(&counts_val, &bin_width_val, total_time, "Changing both.png")?;
     
     println!("Simulation completed successfully!");
