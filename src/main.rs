@@ -604,36 +604,193 @@ fn plot_histogram_omega_gamma(
 }
 
 
-// No CHUNKS NO wirte files YES prograss bars
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    //This variables are fixed for all siulations
-    let dt: f64 = 0.001;
-    let total_time: f64 = 30.0;
-    let steps: usize = (total_time / dt).ceil() as usize;
+// Configuration struct to organize parameters
+#[derive(Debug, Clone)]
+struct SimulationConfig {
+    dt: f64,
+    total_time: f64,
+    steps: usize,
+    omega: f64,
+    gamma: f64,
+    num_trajectories: usize,
+    m: usize,
+}
 
-    
-    // Number of simulations
-    let n_pts = 20_usize;
+// Results struct to organize outputs
+#[derive(Debug)]
+struct SimulationResults {
+    counts: Vec<f64>,
+    bin_width: f64,
+    avg_jumps: f64,
+    entropy: f64,
+    accuracy: f64,
+    resolution: f64,
+    avg_trajectory: Array1<f64>,
+    lindblad_avg: Vec<f64>,
+    mean_avg: f64,
+    std_dev: f64,
+}
 
-    // // Reference values for the parameters
-    // let omega: f64 = 7.0;
-    // let gamma: f64 = 1.0;
-    // let num_trajectories: usize = 1000;
-    // let m: usize = 5;
+impl SimulationConfig {
+    fn new(dt: f64, total_time: f64, omega: f64, gamma: f64, num_trajectories: usize, m: usize) -> Self {
+        let steps = (total_time / dt).ceil() as usize;
+        Self {
+            dt,
+            total_time,
+            steps,
+            omega,
+            gamma,
+            num_trajectories,
+            m,
+        }
+    }
+}
 
-    let init_omega  = 5.0_f64;
-    let last_omega  = 5.0_f64;
+/// Run a complete quantum jump simulation for given parameters
+fn run_quantum_simulation(config: &SimulationConfig) -> Result<SimulationResults, Box<dyn std::error::Error>> {
+    let (pi, _, _, _) = steady_state(config.gamma, config.omega);
 
+    // Progress bar setup
+    let pb_rj = ProgressBar::new(config.num_trajectories as u64);
+    let tpl = format!(
+        "Running RJ {}, {}: [{{bar:40.green/black}}] {{pos}}/{{len}} ({{eta}})",
+        config.gamma, config.omega
+    );
+    pb_rj.set_style(
+        ProgressStyle::default_bar()
+            .template(&tpl)
+            .unwrap(),
+    );
+
+    // Run parallel quantum jump simulations
+    let results: Vec<(Vec<f64>, Array1<f64>, Vec<Array1<Complex64>>)> = 
+        (0..config.num_trajectories)
+            .into_par_iter()
+            .map_init(|| pb_rj.clone(), |pb, _| {
+                let res = simulate_spin_jump_rj(config.omega, config.gamma, config.dt, config.total_time);
+                pb.inc(1);
+                res
+            })
+            .collect();
+
+    // Unpack results
+    let mut trajectories_rj = Vec::with_capacity(config.num_trajectories);
+    let mut times_jumps_rj = Vec::with_capacity(config.num_trajectories);
+    let mut psi_states_rj = Vec::with_capacity(config.num_trajectories);
+    let mut len_jumps = Vec::new();
+
+    for (traj, times, psi) in results {
+        trajectories_rj.push(traj);
+        len_jumps.push(times.len());
+        times_jumps_rj.push(times);
+        psi_states_rj.push(psi);
+    }
+    pb_rj.finish_with_message("RJ simulation complete");
+
+    let avg_jumps = len_jumps.iter().sum::<usize>() as f64 / config.num_trajectories as f64;
+
+    // Run Lindblad simulation for comparison
+    let lindblad_avg = lindblad_simulation(config.omega, config.gamma, config.dt, config.total_time);
+
+    // Analyze waiting times and entropy
+    let (entropy, accuracy, resolution, counts, bin_width) = 
+        analyze_simulation_results(&times_jumps_rj, &psi_states_rj, &pi, config)?;
+
+    // Calculate trajectory averages
+    let flat_rj: Vec<f64> = trajectories_rj.into_iter().flatten().collect();
+    let data_rj = Array2::from_shape_vec((config.num_trajectories, config.steps), flat_rj)?;
+    let avg_trajectory = data_rj.mean_axis(Axis(0)).unwrap();
+    let mean_avg = avg_trajectory.mean().unwrap();
+    let std_dev = avg_trajectory.var(0.0).sqrt();
+
+    Ok(SimulationResults {
+        counts,
+        bin_width,
+        avg_jumps,
+        entropy,
+        accuracy,
+        resolution,
+        avg_trajectory,
+        lindblad_avg,
+        mean_avg,
+        std_dev,
+    })
+}
+
+/// Analyze simulation results for entropy, waiting times, and statistics
+fn analyze_simulation_results(
+    times_jumps: &[Array1<f64>],
+    psi_states: &[Vec<Array1<Complex64>>],
+    pi: &Array2<Complex64>,
+    config: &SimulationConfig,
+) -> Result<(f64, f64, f64, Vec<f64>, f64), Box<dyn std::error::Error>> {
+    let pb_ticks = ProgressBar::new(config.num_trajectories as u64);
+    pb_ticks.set_style(
+        ProgressStyle::default_bar()
+            .template("Analyzing waiting times: [{bar:40.magenta/black}] {pos}/{len} ({eta})")
+            .unwrap(),
+    );
+
+    let results: Vec<(Vec<f64>, Vec<usize>, Vec<f64>)> =
+        times_jumps
+            .par_iter()
+            .zip(psi_states.par_iter())
+            .map_init(
+                || pb_ticks.clone(),
+                |pb, (times, wfs)| {
+                    let aux = compute_tick_times(times, config.m);
+                    pb.inc(1);
+                    analyze_ticks(times, wfs, &aux, pi)
+                },
+            )
+            .collect();
+    pb_ticks.finish_with_message("Waiting time analysis complete");
+
+    // Process results
+    let mut flat_waits = Vec::new();
+    let mut entropies = Vec::new();
+
+    for (wts, _acts, ents) in results {
+        flat_waits.extend(wts);
+        entropies.extend(ents);
+    }
+
+    // Calculate statistics
+    let mean_wait = flat_waits.iter().sum::<f64>() / flat_waits.len() as f64;
+    let var_wait = flat_waits
+        .iter()
+        .map(|&x| (x - mean_wait).powi(2))
+        .sum::<f64>()
+        / ((flat_waits.len() - 1) as f64);
+
+    let arr_ent = Array1::from(entropies);
+    let entropy = (arr_ent.mapv(|e| (-e).exp()).sum().ln() - 
+        (arr_ent.len() as f64).ln()).exp();
+
+    flat_waits.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+    let accuracy = mean_wait.powi(2) / var_wait;
+    let resolution = 1.0 / mean_wait;
+
+    let bin_width = bin_width(&flat_waits);
+    let counts = counts_per_bin(&flat_waits, bin_width, 0.0, config.total_time);
+
+    Ok((entropy, accuracy, resolution, counts, bin_width))
+}
+
+/// Generate parameter vectors for simulation sweep
+fn generate_parameter_vectors(n_pts: usize) -> (Vec<f64>, Vec<f64>, Vec<usize>, Vec<usize>) {
+    let init_omega = 5.0_f64;
+    let last_omega = 5.0_f64;
     let vec_omega: Vec<f64> = (0..n_pts)
         .map(|i| {
             let t = i as f64 / (n_pts - 1) as f64;
             init_omega + t * (last_omega - init_omega)
         })
         .collect();
-    
-    let init_gamma  = 5.0_f64;
-    let last_gamma  = 5.0_f64;
 
+    let init_gamma = 5.0_f64;
+    let last_gamma = 5.0_f64;
     let vec_gamma: Vec<f64> = (0..n_pts)
         .map(|i| {
             let t = i as f64 / (n_pts - 1) as f64;
@@ -641,9 +798,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .collect();
 
-    let init_num_trajectories  = 100_usize;
-    let last_num_trajectories  = 1000_usize;
-
+    let init_num_trajectories = 100_usize;
+    let last_num_trajectories = 1000_usize;
     let vec_num_trajectories: Vec<usize> = (0..n_pts)
         .map(|i| {
             let t = i as f64 / (n_pts - 1) as f64;
@@ -651,9 +807,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .collect();
 
-    let init_m  = 5_usize;
-    let last_m  = 5_usize;
-
+    let init_m = 5_usize;
+    let last_m = 5_usize;
     let vec_m: Vec<usize> = (0..n_pts)
         .map(|i| {
             let t = i as f64 / (n_pts - 1) as f64;
@@ -661,170 +816,280 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .collect();
 
+    (vec_omega, vec_gamma, vec_num_trajectories, vec_m)
+}
+
+// Updated main function
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Fixed simulation parameters
+    let dt: f64 = 0.001;
+    let total_time: f64 = 30.0;
+    let n_pts = 20_usize;
+
+    // Generate parameter vectors
+    let (vec_omega, vec_gamma, vec_num_trajectories, vec_m) = generate_parameter_vectors(n_pts);
+
     println!("Running simulations with omega: {:?} and gamma: {:?}", vec_omega, vec_gamma);
 
+    // Pre-allocate result vectors
     let mut counts_val = Vec::with_capacity(n_pts);
     let mut bin_width_val = Vec::with_capacity(n_pts);
-
     let mut avg_jumps_traj = Vec::with_capacity(n_pts);
     let mut entropys_traj = Vec::with_capacity(n_pts);
-
     let mut accuracy_traj = Vec::with_capacity(n_pts);
     let mut resolution_traj = Vec::with_capacity(n_pts);
 
-    
+    // Run simulations
     for (((&gamma, &omega), &num_trajectories), &m) in vec_gamma.iter()
-                            .zip(vec_omega.iter())
-                            .zip(vec_num_trajectories.iter())
-                            .zip(vec_m.iter()) {
+        .zip(vec_omega.iter())
+        .zip(vec_num_trajectories.iter())
+        .zip(vec_m.iter()) 
+    {
+        let config = SimulationConfig::new(dt, total_time, omega, gamma, num_trajectories, m);
+        let results = run_quantum_simulation(&config)?;
 
+        // Store results
+        counts_val.push(results.counts);
+        bin_width_val.push(results.bin_width);
+        avg_jumps_traj.push(results.avg_jumps);
+        entropys_traj.push(results.entropy);
+        accuracy_traj.push(results.accuracy);
+        resolution_traj.push(results.resolution);
 
-        let (pi, _, _, _) = steady_state(gamma, omega);
-
-        let pb_rj = ProgressBar::new(num_trajectories as u64);
-        let tpl = format!(
-            "Running RJ {}, {}: [{{bar:40.green/black}}] {{pos}}/{{len}} ({{eta}})",
-            gamma, omega
-        );
-        pb_rj.set_style(
-            ProgressStyle::default_bar()
-                .template(&tpl)
-                .unwrap(),
-        );
-
-        // 1) run your parallel sim and collect all the (A,B,C) tuples
-        let results: Vec<(Vec<f64>, Array1<f64>, Vec<Array1<Complex64>>)> = 
-            (0..num_trajectories)
-                .into_par_iter()
-                .map_init(|| pb_rj.clone(), |pb, _| {
-                    let res = simulate_spin_jump_rj(omega, gamma, dt, total_time);
-                    pb.inc(1);
-                    res
-                })
-                .collect();
-
-        // 2) allocate output Vecs up‑front for efficiency
-        let mut trajectories_rj  = Vec::with_capacity(num_trajectories);
-        let mut times_jumps_rj   = Vec::with_capacity(num_trajectories);
-        let mut psi_states_rj    = Vec::with_capacity(num_trajectories);
-
-        let mut len_jumps = Vec::new();
-
-        // 3) unzip by hand
-        for (traj, times, psi) in results {
-            trajectories_rj.push(traj);
-            len_jumps.push(times.len());
-            times_jumps_rj.push(times);
-            psi_states_rj.push(psi);
-        }
-        pb_rj.finish_with_message("RJ simulation complete");
-        
-        avg_jumps_traj.push(len_jumps.iter().sum::<usize>() as f64 / num_trajectories as f64);
-        // println!("Average number of jumps per trajectory: {}", len_jumps.iter().sum::<usize>() as f64 / num_trajectories as f64);
-
-        let lindblad_avg: Vec<f64> = lindblad_simulation(omega, gamma, dt, total_time);
-        
-        let pb_ticks_rj = ProgressBar::new(num_trajectories as u64);
-        pb_ticks_rj.set_style(
-            ProgressStyle::default_bar()
-                .template("Analyzing RJ waiting times: [{bar:40.magenta/black}] {pos}/{len} ({eta})")
-                .unwrap(),
-        );
-
-        let results: Vec<(Vec<f64>, Vec<usize>, Vec<f64>)> =
-            times_jumps_rj
-                .into_par_iter()                        // take ownership of each Vec<f64>
-                .zip(psi_states_rj.into_par_iter())     // pair it with each Vec<Complex64>
-                .map_init(
-                    || pb_ticks_rj.clone(),             // make a new PB handle per thread
-                    |pb, (times, wfs)| {                // times: Vec<f64>, wfs: Vec<Array1<...>>
-                        let aux = compute_tick_times(&times, m);
-                        pb.inc(1);
-                        analyze_ticks(&times, &wfs, &aux, &pi)
-                    },
-                )
-                .collect();
-        pb_ticks_rj.finish_with_message("RJ waiting time analysis complete");
-
-        // Combine all results
-        let mut flat_waits_rj = Vec::new();        // flattened for histogram
-        let mut _activities = Vec::new(); // one avg per trajectory
-        let mut entropies = Vec::new(); // one avg per trajectory
-
-        for (wts, acts, ents) in results {
-            flat_waits_rj.extend(wts); // flatten all waits
-
-            // Average number of actions per trajectory
-            if !acts.is_empty() {
-                let avg_act = acts.iter().map(|x| *x as f64).sum::<f64>();
-                _activities.push(avg_act);
-            }
-
-            entropies.extend(ents); // flatten all entropies
-        }
-        
-        let mean_wait = flat_waits_rj.iter().sum::<f64>() / flat_waits_rj.len() as f64;
-        let var_wait = flat_waits_rj
-                                    .iter()
-                                    .map(|&x| (x - mean_wait).powi(2))
-                                    .sum::<f64>()
-                                    / ((flat_waits_rj.len() - 1) as f64);
-
-        let arr_ent = Array1::from(entropies); // assuming entropies: Vec<f64>
-
-        let sum_exp_m_ent = (arr_ent.mapv(|e| (-e).exp()).sum().ln() - 
-            (arr_ent.len() as f64).ln()).exp() ;// Mean of entropies, using log mean
-
-        entropys_traj.push(sum_exp_m_ent);
-    
-
-        flat_waits_rj.sort_by(|a, b| a.partial_cmp(b).unwrap());
-
-        let accuracy: f64 = mean_wait.powi(2) / var_wait;
-        let resolution: f64 = 1.0/mean_wait;
-
-        accuracy_traj.push(mean_wait);
-        resolution_traj.push(resolution);
-
-        let max_val: f64 = flat_waits_rj[flat_waits_rj.len() - 1];
-
-        let bin_width_rj = bin_width(&flat_waits_rj);
-
-        let counts_rj = counts_per_bin(&flat_waits_rj, bin_width_rj, 0.0, total_time);
-
-        counts_val.push(counts_rj.clone());
-        bin_width_val.push(bin_width_rj.clone());
-        
-        let filename_rj = format!("histogram_rj_omega-{}_gamma-{}_dt-{}_ntraj-{}.png", omega, gamma, dt, num_trajectories);
-        // plot_histogram(&counts_rj, bin_width_rj, 0.0, max_val, &filename_rj)?;
-
-        let flat_rj: Vec<f64> = trajectories_rj.into_iter().flatten().collect();
-        let data_rj = Array2::from_shape_vec((num_trajectories, steps), flat_rj)?;
-
-        let avg_rj: Array1<f64> = data_rj.mean_axis(Axis(0)).unwrap();
-        
-        let mean_avg_rj: f64 = avg_rj.mean().unwrap();
-
-        let std_rj: f64 = avg_rj.var(0.0).sqrt();
-
-        let min: f64 = avg_rj.mean().unwrap() - 2.5 * std_rj;
-        let max: f64 = avg_rj.mean().unwrap() + 2.5 * std_rj;
-                
-        let filename = format!("plot_omega-{}_gamma-{}_dt-{}_ntraj-{}.png", omega, gamma, dt, num_trajectories);
-        // plot_trajectory_avg(avg_rj, lindblad_avg, steps, &filename, min, max, mean_avg_rj, std_rj)?;
+        // Optional: Generate plots for individual simulations
+        // plot_individual_results(&results, &config)?;
     }
-    
-    println!("{}", counts_val.len());
-    println!("{:?}", avg_jumps_traj);
-    println!("{:?}", entropys_traj);
-    println!("{:?}", accuracy_traj);
-    println!("{:?}", resolution_traj);
 
+    // Generate summary plots
     plot_entropy_vs_n_traj(entropys_traj, vec_num_trajectories, "entropy_vs_n_traj.png")?;
-
     plot_histogram_omega_gamma(&counts_val, &bin_width_val, total_time, "Changing both.png")?;
-    
+
     println!("Simulation completed successfully!");
-    
     Ok(())
 }
+
+
+// // No CHUNKS NO wirte files YES prograss bars
+// fn main() -> Result<(), Box<dyn std::error::Error>> {
+//     //This variables are fixed for all siulations
+//     let dt: f64 = 0.001;
+//     let total_time: f64 = 30.0;
+//     let steps: usize = (total_time / dt).ceil() as usize;
+
+    
+//     // Number of simulations
+//     let n_pts = 20_usize;
+
+//     // // Reference values for the parameters
+//     // let omega: f64 = 7.0;
+//     // let gamma: f64 = 1.0;
+//     // let num_trajectories: usize = 1000;
+//     // let m: usize = 5;
+
+//     let init_omega  = 5.0_f64;
+//     let last_omega  = 5.0_f64;
+
+//     let vec_omega: Vec<f64> = (0..n_pts)
+//         .map(|i| {
+//             let t = i as f64 / (n_pts - 1) as f64;
+//             init_omega + t * (last_omega - init_omega)
+//         })
+//         .collect();
+    
+//     let init_gamma  = 5.0_f64;
+//     let last_gamma  = 5.0_f64;
+
+//     let vec_gamma: Vec<f64> = (0..n_pts)
+//         .map(|i| {
+//             let t = i as f64 / (n_pts - 1) as f64;
+//             init_gamma + t * (last_gamma - init_gamma)
+//         })
+//         .collect();
+
+//     let init_num_trajectories  = 100_usize;
+//     let last_num_trajectories  = 1000_usize;
+
+//     let vec_num_trajectories: Vec<usize> = (0..n_pts)
+//         .map(|i| {
+//             let t = i as f64 / (n_pts - 1) as f64;
+//             (init_num_trajectories as f64 + t * (last_num_trajectories - init_num_trajectories) as f64) as usize
+//         })
+//         .collect();
+
+//     let init_m  = 5_usize;
+//     let last_m  = 5_usize;
+
+//     let vec_m: Vec<usize> = (0..n_pts)
+//         .map(|i| {
+//             let t = i as f64 / (n_pts - 1) as f64;
+//             (init_m as f64 + t * (last_m - init_m) as f64) as usize
+//         })
+//         .collect();
+
+//     println!("Running simulations with omega: {:?} and gamma: {:?}", vec_omega, vec_gamma);
+
+//     let mut counts_val = Vec::with_capacity(n_pts);
+//     let mut bin_width_val = Vec::with_capacity(n_pts);
+
+//     let mut avg_jumps_traj = Vec::with_capacity(n_pts);
+//     let mut entropys_traj = Vec::with_capacity(n_pts);
+
+//     let mut accuracy_traj = Vec::with_capacity(n_pts);
+//     let mut resolution_traj = Vec::with_capacity(n_pts);
+
+    
+//     for (((&gamma, &omega), &num_trajectories), &m) in vec_gamma.iter()
+//                             .zip(vec_omega.iter())
+//                             .zip(vec_num_trajectories.iter())
+//                             .zip(vec_m.iter()) {
+
+
+//         let (pi, _, _, _) = steady_state(gamma, omega);
+
+//         let pb_rj = ProgressBar::new(num_trajectories as u64);
+//         let tpl = format!(
+//             "Running RJ {}, {}: [{{bar:40.green/black}}] {{pos}}/{{len}} ({{eta}})",
+//             gamma, omega
+//         );
+//         pb_rj.set_style(
+//             ProgressStyle::default_bar()
+//                 .template(&tpl)
+//                 .unwrap(),
+//         );
+
+//         // 1) run your parallel sim and collect all the (A,B,C) tuples
+//         let results: Vec<(Vec<f64>, Array1<f64>, Vec<Array1<Complex64>>)> = 
+//             (0..num_trajectories)
+//                 .into_par_iter()
+//                 .map_init(|| pb_rj.clone(), |pb, _| {
+//                     let res = simulate_spin_jump_rj(omega, gamma, dt, total_time);
+//                     pb.inc(1);
+//                     res
+//                 })
+//                 .collect();
+
+//         // 2) allocate output Vecs up‑front for efficiency
+//         let mut trajectories_rj  = Vec::with_capacity(num_trajectories);
+//         let mut times_jumps_rj   = Vec::with_capacity(num_trajectories);
+//         let mut psi_states_rj    = Vec::with_capacity(num_trajectories);
+
+//         let mut len_jumps = Vec::new();
+
+//         // 3) unzip by hand
+//         for (traj, times, psi) in results {
+//             trajectories_rj.push(traj);
+//             len_jumps.push(times.len());
+//             times_jumps_rj.push(times);
+//             psi_states_rj.push(psi);
+//         }
+//         pb_rj.finish_with_message("RJ simulation complete");
+        
+//         avg_jumps_traj.push(len_jumps.iter().sum::<usize>() as f64 / num_trajectories as f64);
+//         // println!("Average number of jumps per trajectory: {}", len_jumps.iter().sum::<usize>() as f64 / num_trajectories as f64);
+
+//         let lindblad_avg: Vec<f64> = lindblad_simulation(omega, gamma, dt, total_time);
+        
+//         let pb_ticks_rj = ProgressBar::new(num_trajectories as u64);
+//         pb_ticks_rj.set_style(
+//             ProgressStyle::default_bar()
+//                 .template("Analyzing RJ waiting times: [{bar:40.magenta/black}] {pos}/{len} ({eta})")
+//                 .unwrap(),
+//         );
+
+//         let results: Vec<(Vec<f64>, Vec<usize>, Vec<f64>)> =
+//             times_jumps_rj
+//                 .into_par_iter()                        // take ownership of each Vec<f64>
+//                 .zip(psi_states_rj.into_par_iter())     // pair it with each Vec<Complex64>
+//                 .map_init(
+//                     || pb_ticks_rj.clone(),             // make a new PB handle per thread
+//                     |pb, (times, wfs)| {                // times: Vec<f64>, wfs: Vec<Array1<...>>
+//                         let aux = compute_tick_times(&times, m);
+//                         pb.inc(1);
+//                         analyze_ticks(&times, &wfs, &aux, &pi)
+//                     },
+//                 )
+//                 .collect();
+//         pb_ticks_rj.finish_with_message("RJ waiting time analysis complete");
+
+//         // Combine all results
+//         let mut flat_waits_rj = Vec::new();        // flattened for histogram
+//         let mut _activities = Vec::new(); // one avg per trajectory
+//         let mut entropies = Vec::new(); // one avg per trajectory
+
+//         for (wts, acts, ents) in results {
+//             flat_waits_rj.extend(wts); // flatten all waits
+
+//             // Average number of actions per trajectory
+//             if !acts.is_empty() {
+//                 let avg_act = acts.iter().map(|x| *x as f64).sum::<f64>();
+//                 _activities.push(avg_act);
+//             }
+
+//             entropies.extend(ents); // flatten all entropies
+//         }
+        
+//         let mean_wait = flat_waits_rj.iter().sum::<f64>() / flat_waits_rj.len() as f64;
+//         let var_wait = flat_waits_rj
+//                                     .iter()
+//                                     .map(|&x| (x - mean_wait).powi(2))
+//                                     .sum::<f64>()
+//                                     / ((flat_waits_rj.len() - 1) as f64);
+
+//         let arr_ent = Array1::from(entropies); // assuming entropies: Vec<f64>
+
+//         let sum_exp_m_ent = (arr_ent.mapv(|e| (-e).exp()).sum().ln() - 
+//             (arr_ent.len() as f64).ln()).exp() ;// Mean of entropies, using log mean
+
+//         entropys_traj.push(sum_exp_m_ent);
+    
+
+//         flat_waits_rj.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+//         let accuracy: f64 = mean_wait.powi(2) / var_wait;
+//         let resolution: f64 = 1.0/mean_wait;
+
+//         accuracy_traj.push(mean_wait);
+//         resolution_traj.push(resolution);
+
+//         let max_val: f64 = flat_waits_rj[flat_waits_rj.len() - 1];
+
+//         let bin_width_rj = bin_width(&flat_waits_rj);
+
+//         let counts_rj = counts_per_bin(&flat_waits_rj, bin_width_rj, 0.0, total_time);
+
+//         counts_val.push(counts_rj.clone());
+//         bin_width_val.push(bin_width_rj.clone());
+        
+//         let filename_rj = format!("histogram_rj_omega-{}_gamma-{}_dt-{}_ntraj-{}.png", omega, gamma, dt, num_trajectories);
+//         // plot_histogram(&counts_rj, bin_width_rj, 0.0, max_val, &filename_rj)?;
+
+//         let flat_rj: Vec<f64> = trajectories_rj.into_iter().flatten().collect();
+//         let data_rj = Array2::from_shape_vec((num_trajectories, steps), flat_rj)?;
+
+//         let avg_rj: Array1<f64> = data_rj.mean_axis(Axis(0)).unwrap();
+        
+//         let mean_avg_rj: f64 = avg_rj.mean().unwrap();
+
+//         let std_rj: f64 = avg_rj.var(0.0).sqrt();
+
+//         let min: f64 = avg_rj.mean().unwrap() - 2.5 * std_rj;
+//         let max: f64 = avg_rj.mean().unwrap() + 2.5 * std_rj;
+                
+//         let filename = format!("plot_omega-{}_gamma-{}_dt-{}_ntraj-{}.png", omega, gamma, dt, num_trajectories);
+//         // plot_trajectory_avg(avg_rj, lindblad_avg, steps, &filename, min, max, mean_avg_rj, std_rj)?;
+//     }
+    
+//     println!("{}", counts_val.len());
+//     println!("{:?}", avg_jumps_traj);
+//     println!("{:?}", entropys_traj);
+//     println!("{:?}", accuracy_traj);
+//     println!("{:?}", resolution_traj);
+
+//     plot_entropy_vs_n_traj(entropys_traj, vec_num_trajectories, "entropy_vs_n_traj.png")?;
+
+//     plot_histogram_omega_gamma(&counts_val, &bin_width_val, total_time, "Changing both.png")?;
+    
+//     println!("Simulation completed successfully!");
+    
+//     Ok(())
+// }
