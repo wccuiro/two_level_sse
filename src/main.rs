@@ -282,7 +282,7 @@ fn counts_per_bin(
         }
     }
 
-    let total: f64 = counts.iter().sum::<usize>() as f64;
+    let total: f64 = counts.iter().sum::<usize>() as f64 * bin_width;
     let norm_counts: Vec<f64> = counts.iter().map(|&e| e as f64 / total).collect();
 
     norm_counts
@@ -487,138 +487,313 @@ fn plot_trajectory_avg(
 }
 
 
+fn plot_entropy_vs_n_traj(
+    entropies_traj: Vec<Vec<f64>>,
+    n_traj: Vec<usize>,
+    filename: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_eq!(entropies_traj.len(), n_traj.len());
 
+    // Compute the transformed entropy values
+    let values: Vec<f64> = entropies_traj
+        .iter()
+        .map(|ent| {
+            let sum_exp_neg = ent.iter().map(|e| (-e).exp()).sum::<f64>();
+            let len = ent.len() as f64;
+            (sum_exp_neg.ln() - len.ln()).exp()
+        })
+        .collect();
+
+    // Set up the plot
+    let root = BitMapBackend::new(filename, (1600, 1200)).into_drawing_area();
+    root.fill(&WHITE)?;
+
+    let x_range = *n_traj.iter().min().unwrap() as f64..*n_traj.iter().max().unwrap() as f64;
+    let y_range = values
+        .iter()
+        .cloned()
+        .fold(f64::INFINITY..f64::NEG_INFINITY, |acc, v| {
+            acc.start.min(v)..acc.end.max(v)
+        });
+
+    let mut chart = ChartBuilder::on(&root)
+        .caption("Transformed Entropy vs. Number of Trajectories", ("sans-serif", 30))
+        .margin(40)
+        .x_label_area_size(40)
+        .y_label_area_size(60)
+        .build_cartesian_2d(x_range.clone(), y_range.clone())?;
+
+    chart.configure_mesh().draw()?;
+
+    chart.draw_series(LineSeries::new(
+        n_traj.iter().zip(values.iter()).map(|(x, y)| (*x as f64, *y)),
+        &RED,
+    ))?;
+
+    Ok(())
+}
+
+use plotters::prelude::*;
+
+fn plot_histogram_omega_gamma(
+    counts_val: &[Vec<f64>],
+    bin_width_val: &[f64],
+    total_time: f64,
+    filename_rj: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_eq!(
+        counts_val.len(),
+        bin_width_val.len(),
+        "counts_val and bin_width_val must have the same length"
+    );
+
+    // Compute global max_count across all histograms
+    let global_max = counts_val
+        .iter()
+        .flat_map(|counts| counts.iter())
+        .cloned()
+        .fold(0.0_f64, f64::max);
+
+    // Single drawing area
+    let root = BitMapBackend::new(filename_rj, (1600, 1200)).into_drawing_area();
+    root.fill(&WHITE)?;
+
+    // Build one chart spanning the full area
+    let mut chart = ChartBuilder::on(&root)
+        .caption("Changing both", ("sans-serif", 40))
+        .margin(30)
+        .x_label_area_size(50)
+        .y_label_area_size(60)
+        .build_cartesian_2d(0.0..total_time, 0.0..global_max)?;
+
+    chart
+        .configure_mesh()
+        .x_desc("Time")
+        .y_desc("Count")
+        .draw()?;
+
+    // A palette of base colors (RGBColor refs)
+    let palette = [&RED, &BLUE, &GREEN, &MAGENTA, &CYAN];
+
+    for (idx, (counts, &bin_width)) in
+        counts_val.iter().zip(bin_width_val.iter()).enumerate()
+    {
+        // pick the base color for this series
+        let color = palette[idx % palette.len()];
+
+        // build a semi‑transparent ShapeStyle once
+        let bar_style = color.mix(0.6).filled();
+
+        // draw each bar with that style
+        for (i, &count) in counts.iter().enumerate() {
+            let x0 = i as f64 * bin_width;
+            let x1 = x0 + bin_width;
+            chart.draw_series(std::iter::once(
+                Rectangle::new([(x0, 0.0), (x1, count)], bar_style.clone()),
+            ))?;
+        }
+
+        // add a legend entry using the *same* style
+        chart
+            .draw_series(std::iter::once(Circle::new(
+                (total_time * 0.05, global_max * (0.95 - 0.05 * idx as f64)),
+                5,
+                bar_style.clone(),
+            )))?
+            .label(format!("alpha {}", idx))
+            .legend(move |(x, y)| {
+                Rectangle::new([(x, y - 5), (x + 10, y + 5)], bar_style.clone())
+            });
+    }
+
+    // then draw the legend box once at the end
+    chart
+        .configure_series_labels()
+        .background_style(&WHITE.mix(0.8))
+        .border_style(&BLACK)
+        .draw()?;
+
+    Ok(())
+}
 
 
 // No CHUNKS NO wirte files YES prograss bars
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let omega: f64 = 3.0;
+    let omega: f64 = 7.0;
     let gamma: f64 = 1.0;
     let dt: f64 = 0.001;
     let total_time: f64 = 30.0;
-    let num_trajectories: usize = 10000;
+    let num_trajectories: usize = 1000;
     let m: usize = 5;
     let steps: usize = (total_time / dt).ceil() as usize;
 
-    let (pi, _, _, _) = steady_state(gamma, omega);
+    let n_pts = 4_usize;
 
-    let pb_rj = ProgressBar::new(num_trajectories as u64);
-    pb_rj.set_style(
-        ProgressStyle::default_bar()
-            .template("Running RJ: [{bar:40.green/black}] {pos}/{len} ({eta})")
-            .unwrap(),
-    );
+    let init_omega  = 3.0_f64;
+    let last_omega  = 10.0_f64;
 
-    // 1) run your parallel sim and collect all the (A,B,C) tuples
-    let results: Vec<(Vec<f64>, Array1<f64>, Vec<Array1<Complex64>>)> = 
-        (0..num_trajectories)
-            .into_par_iter()
-            .map_init(|| pb_rj.clone(), |pb, _| {
-                let res = simulate_spin_jump_rj(omega, gamma, dt, total_time);
-                pb.inc(1);
-                res
-            })
-            .collect();
-
-    // 2) allocate output Vecs up‑front for efficiency
-    let mut trajectories_rj  = Vec::with_capacity(num_trajectories);
-    let mut times_jumps_rj   = Vec::with_capacity(num_trajectories);
-    let mut psi_states_rj    = Vec::with_capacity(num_trajectories);
-
-    let mut len_jumps = Vec::new();
-
-    // 3) unzip by hand
-    for (traj, times, psi) in results {
-        trajectories_rj.push(traj);
-        len_jumps.push(times.len());
-        times_jumps_rj.push(times);
-        psi_states_rj.push(psi);
-    }
-    pb_rj.finish_with_message("RJ simulation complete");
+    let vec_omega: Vec<f64> = (0..n_pts)
+        .map(|i| {
+            let t = i as f64 / (n_pts - 1) as f64;
+            init_omega + t * (last_omega - init_omega)
+        })
+        .collect();
     
-    println!("Average number of jumps per trajectory: {}", len_jumps.iter().sum::<usize>() as f64 / num_trajectories as f64);
+    let init_gamma  = 1.0_f64;
+    let last_gamma  = 7.0_f64;
 
-    let lindblad_avg: Vec<f64> = lindblad_simulation(omega, gamma, dt, total_time);
+    let vec_gamma: Vec<f64> = (0..n_pts)
+        .map(|i| {
+            let t = i as f64 / (n_pts - 1) as f64;
+            init_gamma + t * (last_gamma - init_gamma)
+        })
+        .collect();
+        
+    println!("Running simulations with omega: {:?} and gamma: {:?}", vec_omega, vec_gamma);
+
+    let mut  counts_val = Vec::with_capacity(n_pts);
+    let mut bin_width_val = Vec::with_capacity(n_pts);
+
+    let mut avg_jumps_traj = Vec::with_capacity(n_pts);
     
-    let pb_ticks_rj = ProgressBar::new(num_trajectories as u64);
-    pb_ticks_rj.set_style(
-        ProgressStyle::default_bar()
-            .template("Analyzing RJ waiting times: [{bar:40.magenta/black}] {pos}/{len} ({eta})")
-            .unwrap(),
-    );
+    for (&gamma,&omega) in vec_gamma.iter().zip(vec_omega.iter()) {
 
-    let results: Vec<(Vec<f64>, Vec<usize>, Vec<f64>)> =
-        times_jumps_rj
-            .into_par_iter()                        // take ownership of each Vec<f64>
-            .zip(psi_states_rj.into_par_iter())     // pair it with each Vec<Complex64>
-            .map_init(
-                || pb_ticks_rj.clone(),             // make a new PB handle per thread
-                |pb, (times, wfs)| {                // times: Vec<f64>, wfs: Vec<Array1<...>>
-                    let aux = compute_tick_times(&times, m);
+
+        let (pi, _, _, _) = steady_state(gamma, omega);
+
+        let pb_rj = ProgressBar::new(num_trajectories as u64);
+        let tpl = format!(
+            "Running RJ {}, {}: [{{bar:40.green/black}}] {{pos}}/{{len}} ({{eta}})",
+            gamma, omega
+        );
+        pb_rj.set_style(
+            ProgressStyle::default_bar()
+                .template(&tpl)
+                .unwrap(),
+        );
+
+        // 1) run your parallel sim and collect all the (A,B,C) tuples
+        let results: Vec<(Vec<f64>, Array1<f64>, Vec<Array1<Complex64>>)> = 
+            (0..num_trajectories)
+                .into_par_iter()
+                .map_init(|| pb_rj.clone(), |pb, _| {
+                    let res = simulate_spin_jump_rj(omega, gamma, dt, total_time);
                     pb.inc(1);
-                    analyze_ticks(&times, &wfs, &aux, &pi)
-                },
-            )
-            .collect();
-    pb_ticks_rj.finish_with_message("RJ waiting time analysis complete");
+                    res
+                })
+                .collect();
 
-    // Combine all results
-    let mut flat_waits_rj = Vec::new();        // flattened for histogram
-    let mut _activities = Vec::new(); // one avg per trajectory
-    let mut entropies = Vec::new(); // one avg per trajectory
+        // 2) allocate output Vecs up‑front for efficiency
+        let mut trajectories_rj  = Vec::with_capacity(num_trajectories);
+        let mut times_jumps_rj   = Vec::with_capacity(num_trajectories);
+        let mut psi_states_rj    = Vec::with_capacity(num_trajectories);
 
-    for (wts, acts, ents) in results {
-        flat_waits_rj.extend(wts); // flatten all waits
+        let mut len_jumps = Vec::new();
 
-        // Average number of actions per trajectory
-        if !acts.is_empty() {
-            let avg_act = acts.iter().map(|x| *x as f64).sum::<f64>();
-            _activities.push(avg_act);
+        // 3) unzip by hand
+        for (traj, times, psi) in results {
+            trajectories_rj.push(traj);
+            len_jumps.push(times.len());
+            times_jumps_rj.push(times);
+            psi_states_rj.push(psi);
         }
+        pb_rj.finish_with_message("RJ simulation complete");
+        
+        avg_jumps_traj.push(len_jumps.iter().sum::<usize>() as f64 / num_trajectories as f64);
+        // println!("Average number of jumps per trajectory: {}", len_jumps.iter().sum::<usize>() as f64 / num_trajectories as f64);
 
-        entropies.extend(ents); // flatten all entropies
+        let lindblad_avg: Vec<f64> = lindblad_simulation(omega, gamma, dt, total_time);
+        
+        let pb_ticks_rj = ProgressBar::new(num_trajectories as u64);
+        pb_ticks_rj.set_style(
+            ProgressStyle::default_bar()
+                .template("Analyzing RJ waiting times: [{bar:40.magenta/black}] {pos}/{len} ({eta})")
+                .unwrap(),
+        );
+
+        let results: Vec<(Vec<f64>, Vec<usize>, Vec<f64>)> =
+            times_jumps_rj
+                .into_par_iter()                        // take ownership of each Vec<f64>
+                .zip(psi_states_rj.into_par_iter())     // pair it with each Vec<Complex64>
+                .map_init(
+                    || pb_ticks_rj.clone(),             // make a new PB handle per thread
+                    |pb, (times, wfs)| {                // times: Vec<f64>, wfs: Vec<Array1<...>>
+                        let aux = compute_tick_times(&times, m);
+                        pb.inc(1);
+                        analyze_ticks(&times, &wfs, &aux, &pi)
+                    },
+                )
+                .collect();
+        pb_ticks_rj.finish_with_message("RJ waiting time analysis complete");
+
+        // Combine all results
+        let mut flat_waits_rj = Vec::new();        // flattened for histogram
+        let mut _activities = Vec::new(); // one avg per trajectory
+        let mut entropies = Vec::new(); // one avg per trajectory
+
+        for (wts, acts, ents) in results {
+            flat_waits_rj.extend(wts); // flatten all waits
+
+            // Average number of actions per trajectory
+            if !acts.is_empty() {
+                let avg_act = acts.iter().map(|x| *x as f64).sum::<f64>();
+                _activities.push(avg_act);
+            }
+
+            entropies.extend(ents); // flatten all entropies
+        }
+        
+        let mean_wait = flat_waits_rj.iter().sum::<f64>() / flat_waits_rj.len() as f64;
+
+        let arr_ent = Array1::from(entropies); // assuming entropies: Vec<f64>
+
+        let mean_ent = (arr_ent.mapv(|e| (-e).exp()).sum().ln() - 
+            (arr_ent.len() as f64).ln()).exp() ;// Mean of entropies, using log mean
+        let std_dev_ent = arr_ent.std(0.0); // 0.0 = population std dev, use 1.0 for sample std dev
+
+        println!("Mean of entropies: {}", mean_ent);
+
+    
+
+        flat_waits_rj.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+        let max_val: f64 = flat_waits_rj[flat_waits_rj.len() - 1];
+
+        let bin_width_rj = bin_width(&flat_waits_rj);
+
+        let counts_rj = counts_per_bin(&flat_waits_rj, bin_width_rj, 0.0, total_time);
+
+        counts_val.push(counts_rj.clone());
+        bin_width_val.push(bin_width_rj.clone());
+        
+        let filename_rj = format!("histogram_rj_omega-{}_gamma-{}_dt-{}_ntraj-{}.png", omega, gamma, dt, num_trajectories);
+        // plot_histogram(&counts_rj, bin_width_rj, 0.0, max_val, &filename_rj)?;
+
+        let flat_rj: Vec<f64> = trajectories_rj.into_iter().flatten().collect();
+        let data_rj = Array2::from_shape_vec((num_trajectories, steps), flat_rj)?;
+
+        let avg_rj: Array1<f64> = data_rj.mean_axis(Axis(0)).unwrap();
+        
+        let mean_avg_rj: f64 = avg_rj.mean().unwrap();
+
+        let std_rj: f64 = avg_rj.var(0.0).sqrt();
+
+        let min: f64 = avg_rj.mean().unwrap() - 2.5 * std_rj;
+        let max: f64 = avg_rj.mean().unwrap() + 2.5 * std_rj;
+        
+        println!("RJ average trajectory: {}", avg_rj.mean().unwrap());
+        println!("RJ average trajectory std: {}", avg_rj.var(0.0).sqrt());
+        
+        let filename = format!("plot_omega-{}_gamma-{}_dt-{}_ntraj-{}.png", omega, gamma, dt, num_trajectories);
+        // plot_trajectory_avg(avg_rj, lindblad_avg, steps, &filename, min, max, mean_avg_rj, std_rj)?;
+        
+        println!("Generated files: {}, {}", filename_rj, filename);
     }
     
-    let mean_wait = flat_waits_rj.iter().sum::<f64>() / flat_waits_rj.len() as f64;
-
-    let arr_ent = Array1::from(entropies); // assuming entropies: Vec<f64>
-
-    let mean_ent = (arr_ent.mapv(|e| (-e).exp()).sum().ln() - 
-        (arr_ent.len() as f64).ln()).exp() ;// Mean of entropies, using log mean
-    let std_dev_ent = arr_ent.std(0.0); // 0.0 = population std dev, use 1.0 for sample std dev
-
-    println!("Mean of entropies: {}", mean_ent);
-
-  
-
-    flat_waits_rj.sort_by(|a, b| a.partial_cmp(b).unwrap());
-
-    let bin_width_rj = bin_width(&flat_waits_rj);
-
-    let counts_rj = counts_per_bin(&flat_waits_rj, bin_width_rj, 0.0, total_time);
-    
-    let filename_rj = format!("histogram_rj_omega-{}_gamma-{}_dt-{}_ntraj-{}.png", omega, gamma, dt, num_trajectories);
-    plot_histogram(&counts_rj, bin_width_rj, 0.0, total_time, &filename_rj)?;
-
-    let flat_rj: Vec<f64> = trajectories_rj.into_iter().flatten().collect();
-    let data_rj = Array2::from_shape_vec((num_trajectories, steps), flat_rj)?;
-
-    let avg_rj: Array1<f64> = data_rj.mean_axis(Axis(0)).unwrap();
-    
-    let mean_avg_rj: f64 = avg_rj.mean().unwrap();
-
-    let std_rj: f64 = avg_rj.var(0.0).sqrt();
-
-    let min: f64 = avg_rj.mean().unwrap() - 2.5 * std_rj;
-    let max: f64 = avg_rj.mean().unwrap() + 2.5 * std_rj;
-    
-    println!("RJ average trajectory: {}", avg_rj.mean().unwrap());
-    println!("RJ average trajectory std: {}", avg_rj.var(0.0).sqrt());
-    
-    let filename = format!("plot_omega-{}_gamma-{}_dt-{}_ntraj-{}.png", omega, gamma, dt, num_trajectories);
-    plot_trajectory_avg(avg_rj, lindblad_avg, steps, &filename, min, max, mean_avg_rj, std_rj)?;
+    println!("{}", counts_val.len());
+    plot_histogram_omega_gamma(&counts_val, &bin_width_val, total_time, "Changing both.png")?;
     
     println!("Simulation completed successfully!");
-    println!("Generated files: {}, {}", filename_rj, filename);
+    
     Ok(())
 }
