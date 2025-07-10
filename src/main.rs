@@ -486,7 +486,6 @@ fn plot_trajectory_avg(
     Ok(())
 }
 
-
 fn plot_entropy_vs_n_traj(
     entropies_traj: Vec<Vec<f64>>,
     n_traj: Vec<usize>,
@@ -532,8 +531,6 @@ fn plot_entropy_vs_n_traj(
 
     Ok(())
 }
-
-use plotters::prelude::*;
 
 fn plot_histogram_omega_gamma(
     counts_val: &[Vec<f64>],
@@ -619,15 +616,20 @@ fn plot_histogram_omega_gamma(
 
 // No CHUNKS NO wirte files YES prograss bars
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let omega: f64 = 7.0;
-    let gamma: f64 = 1.0;
+    //This variables are fixed for all siulations
     let dt: f64 = 0.001;
     let total_time: f64 = 30.0;
-    let num_trajectories: usize = 1000;
-    let m: usize = 5;
     let steps: usize = (total_time / dt).ceil() as usize;
 
+    
+    // Number of simulations
     let n_pts = 4_usize;
+
+    // // Reference values for the parameters
+    // let omega: f64 = 7.0;
+    // let gamma: f64 = 1.0;
+    // let num_trajectories: usize = 1000;
+    // let m: usize = 5;
 
     let init_omega  = 3.0_f64;
     let last_omega  = 10.0_f64;
@@ -648,15 +650,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             init_gamma + t * (last_gamma - init_gamma)
         })
         .collect();
-        
+
+    let init_num_trajectories  = 1000_usize;
+    let last_num_trajectories  = 1000_usize;
+
+    let vec_num_trajectories: Vec<usize> = (0..n_pts)
+        .map(|i| {
+            let t = i as f64 / (n_pts - 1) as f64;
+            (init_num_trajectories as f64 + t * (last_num_trajectories - init_num_trajectories) as f64) as usize
+        })
+        .collect();
+
+    let init_m  = 5_usize;
+    let last_m  = 5_usize;
+
+    let vec_m: Vec<usize> = (0..n_pts)
+        .map(|i| {
+            let t = i as f64 / (n_pts - 1) as f64;
+            (init_m as f64 + t * (last_m - init_m) as f64) as usize
+        })
+        .collect();
+
     println!("Running simulations with omega: {:?} and gamma: {:?}", vec_omega, vec_gamma);
 
-    let mut  counts_val = Vec::with_capacity(n_pts);
+    let mut counts_val = Vec::with_capacity(n_pts);
     let mut bin_width_val = Vec::with_capacity(n_pts);
 
     let mut avg_jumps_traj = Vec::with_capacity(n_pts);
+    let mut entropys_traj = Vec::with_capacity(n_pts);
+
+    let mut accuracy_traj = Vec::with_capacity(n_pts);
+    let mut resolution_traj = Vec::with_capacity(n_pts);
+
     
-    for (&gamma,&omega) in vec_gamma.iter().zip(vec_omega.iter()) {
+    for (((&gamma, &omega), &num_trajectories), &m) in vec_gamma.iter()
+                            .zip(vec_omega.iter())
+                            .zip(vec_num_trajectories.iter())
+                            .zip(vec_m.iter()) {
 
 
         let (pi, _, _, _) = steady_state(gamma, omega);
@@ -744,18 +774,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         
         let mean_wait = flat_waits_rj.iter().sum::<f64>() / flat_waits_rj.len() as f64;
+        let var_wait = flat_waits_rj
+                                    .iter()
+                                    .map(|&x| (x - mean_wait).powi(2))
+                                    .sum::<f64>()
+                                    / ((flat_waits_rj.len() - 1) as f64);
 
         let arr_ent = Array1::from(entropies); // assuming entropies: Vec<f64>
 
-        let mean_ent = (arr_ent.mapv(|e| (-e).exp()).sum().ln() - 
+        let sum_exp_m_ent = (arr_ent.mapv(|e| (-e).exp()).sum().ln() - 
             (arr_ent.len() as f64).ln()).exp() ;// Mean of entropies, using log mean
-        let std_dev_ent = arr_ent.std(0.0); // 0.0 = population std dev, use 1.0 for sample std dev
+        // let std_dev_ent = arr_ent.std(0.0); // 0.0 = population std dev, use 1.0 for sample std dev
 
-        println!("Mean of entropies: {}", mean_ent);
+        entropys_traj.push(sum_exp_m_ent);
+        // println!("Mean of entropies: {}", mean_ent);
 
     
 
         flat_waits_rj.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+        let accuracy: f64 = mean_wait.powi(2) / var_wait;
+        let resolution: f64 = 1.0/mean_wait;
+
+        accuracy_traj.push(mean_wait);
+        resolution_traj.push(resolution);
 
         let max_val: f64 = flat_waits_rj[flat_waits_rj.len() - 1];
 
@@ -780,17 +822,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let min: f64 = avg_rj.mean().unwrap() - 2.5 * std_rj;
         let max: f64 = avg_rj.mean().unwrap() + 2.5 * std_rj;
-        
-        println!("RJ average trajectory: {}", avg_rj.mean().unwrap());
-        println!("RJ average trajectory std: {}", avg_rj.var(0.0).sqrt());
-        
+                
         let filename = format!("plot_omega-{}_gamma-{}_dt-{}_ntraj-{}.png", omega, gamma, dt, num_trajectories);
-        // plot_trajectory_avg(avg_rj, lindblad_avg, steps, &filename, min, max, mean_avg_rj, std_rj)?;
-        
-        println!("Generated files: {}, {}", filename_rj, filename);
     }
     
     println!("{}", counts_val.len());
+    println!("{:?}", avg_jumps_traj);
+    println!("{:?}", entropys_traj);
+    println!("{:?}", accuracy_traj);
+    println!("{:?}", resolution_traj);
     plot_histogram_omega_gamma(&counts_val, &bin_width_val, total_time, "Changing both.png")?;
     
     println!("Simulation completed successfully!");
